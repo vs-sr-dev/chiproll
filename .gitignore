@@ -1,0 +1,29 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+*~
+
+# Node (defensive — project is vanilla JS, no build step)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logs
+*.log
+
+# Test MIDI files — keep them out by default (copyright). Add specific ones with `git add -f`.
+*.mid
+*.midi
+
+# Working foundation — internal briefs, not part of the public source tree.
+Chiproll.md
+chiproll_midi_import_brief_ita.md

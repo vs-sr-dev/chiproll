@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ChipRoll</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">ChipRoll MVP</p>
+          <h1 id="hero-title">ChipRoll - NES / Famicom</h1>
+          <p id="hero-copy" class="hero-copy"></p>
+        </div>
+        <div class="hero-actions">
+          <label class="chip-select-wrap" for="chip-select">
+            <span class="chip-select-label">Chip</span>
+            <select id="chip-select" class="chip-select">
+              <option value="NES">NES / Famicom</option>
+              <option value="TIA">Atari TIA</option>
+            </select>
+          </label>
+          <button id="import-button" type="button" class="hero-import">Import MIDI</button>
+          <div id="hero-chip" class="hero-chip"></div>
+        </div>
+      </header>
+
+      <main>
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="panel-label">Channel</p>
+              <h2 id="panel-title">Pulse 1 / Triangle / Noise</h2>
+            </div>
+            <div class="transport">
+              <div class="transport-settings">
+                <label class="meta-control" for="bpm-input">
+                  <span class="meta-control-label">BPM</span>
+                  <input id="bpm-input" class="meta-input" type="number" min="40" max="300" step="1" value="120" />
+                </label>
+                <label class="meta-control" for="step-count-select">
+                  <span class="meta-control-label">Step</span>
+                  <select id="step-count-select" class="meta-select">
+                    <option value="8">8</option>
+                    <option value="16" selected>16</option>
+                    <option value="32">32</option>
+                  </select>
+                </label>
+              </div>
+              <div class="transport-buttons">
+                <button id="play-button" class="transport-button" type="button">Play</button>
+                <button id="stop-button" class="transport-button secondary" type="button">Stop</button>
+                <button id="loop-button" class="transport-button secondary" type="button" aria-pressed="false">Loop</button>
+                <button id="clear-button" class="transport-button danger" type="button">Clear</button>
+              </div>
+            </div>
+          </div>
+          <div id="piano-roll-root"></div>
+        </section>
+
+      </main>
+    </div>
+
+    <div id="import-overlay" class="import-overlay hidden" aria-hidden="true">
+      <div class="import-modal" role="dialog" aria-labelledby="import-title">
+        <header class="import-header">
+          <div>
+            <p class="panel-label">Import</p>
+            <h2 id="import-title">Import MIDI / MusicXML</h2>
+          </div>
+          <button id="import-close" type="button" class="import-close" aria-label="Close">&times;</button>
+        </header>
+
+        <div id="import-drop-zone" class="import-drop-zone">
+          <p class="drop-zone-text">Drop a MIDI file here</p>
+          <p class="drop-zone-hint">or click to select</p>
+          <input id="import-file-input" type="file" accept=".mid,.midi,audio/midi,audio/x-midi" hidden />
+        </div>
+
+        <p id="import-status" class="import-status"></p>
+
+        <div id="import-controls" class="import-controls hidden">
+          <label class="meta-control" for="voice-strategy-select">
+            <span class="meta-control-label">Voice strategy</span>
+            <select id="voice-strategy-select" class="meta-select">
+              <option value="highest">Top melody</option>
+              <option value="lowest">Bottom bass</option>
+              <option value="last">Last wins</option>
+            </select>
+          </label>
+          <p id="import-summary" class="import-summary"></p>
+        </div>
+
+        <div id="import-tracks" class="import-tracks"></div>
+        <div id="import-unassigned" class="import-unassigned"></div>
+
+        <footer class="import-footer">
+          <button id="import-cancel" type="button" class="transport-button secondary">Cancel</button>
+          <button id="import-confirm" type="button" class="transport-button" disabled>Confirm Import</button>
+        </footer>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.min.js"></script>
+    <script src="./frequencyEngine.js"></script>
+    <script src="./gmMapping.js"></script>
+    <script src="./quantizer.js"></script>
+    <script src="./voiceReducer.js"></script>
+    <script src="./trackAssigner.js"></script>
+    <script src="./midiParser.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

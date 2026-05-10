@@ -1,0 +1,2478 @@
+(function buildChipRollApp() {
+  const root = document.getElementById("piano-roll-root");
+  const chipSelect = document.getElementById("chip-select");
+  const heroTitle = document.getElementById("hero-title");
+  const heroCopy = document.getElementById("hero-copy");
+  const heroChip = document.getElementById("hero-chip");
+  const panelTitle = document.getElementById("panel-title");
+  const playButton = document.getElementById("play-button");
+  const stopButton = document.getElementById("stop-button");
+  const loopButton = document.getElementById("loop-button");
+  const clearButton = document.getElementById("clear-button");
+  const bpmInput = document.getElementById("bpm-input");
+  const stepCountSelect = document.getElementById("step-count-select");
+  const importButton = document.getElementById("import-button");
+  const importOverlay = document.getElementById("import-overlay");
+  const importClose = document.getElementById("import-close");
+  const importDropZone = document.getElementById("import-drop-zone");
+  const importFileInput = document.getElementById("import-file-input");
+  const importStatus = document.getElementById("import-status");
+  const importControls = document.getElementById("import-controls");
+  const voiceStrategySelect = document.getElementById("voice-strategy-select");
+  const importSummary = document.getElementById("import-summary");
+  const importTracksList = document.getElementById("import-tracks");
+  const importUnassignedList = document.getElementById("import-unassigned");
+  const importCancel = document.getElementById("import-cancel");
+  const importConfirm = document.getElementById("import-confirm");
+  const {
+    TIA_TIMBRE_OPTIONS,
+    getNearestNote,
+    getTiaFrequencyTable,
+  } = window.FrequencyEngine;
+  const { parseMidi } = window.MidiParser;
+  const { quantizeTrack } = window.Quantizer;
+  const { reduceTrack } = window.VoiceReducer;
+  const { PERSONALITIES, getGmFamily } = window.GmMapping;
+  const { assignTracks } = window.TrackAssigner;
+  const VOICE_STRATEGIES = ["highest", "lowest", "last"];
+  const NES_CHANNEL_LABELS = {
+    pulse1: "Pulse 1",
+    pulse2: "Pulse 2",
+    triangle: "Triangle",
+    noise: "Noise",
+  };
+  const TIA_CHANNEL_LABELS = {
+    tia1: "TIA Ch.1",
+    tia2: "TIA Ch.2",
+  };
+  const STEP_COUNT_OPTIONS = [8, 16, 32];
+  const BPM_MIN = 40;
+  const BPM_MAX = 300;
+  const PREVIEW_DURATION_SECONDS = 0.15;
+  const ATTACK_SECONDS = 0.005;
+  const RELEASE_SECONDS = 0.05;
+  const CHIP_OPTIONS = {
+    NES: {
+      heroTitle: "ChipRoll - NES / Famicom",
+      heroCopy:
+        "Three separate NES channels, 16 steps and instant playback. Pulse and Triangle are pitched; Noise is percussive.",
+      heroChip: "NES / Famicom",
+      panelTitle: "Pulse 1 / Triangle / Noise",
+    },
+    TIA: {
+      heroTitle: "ChipRoll - Atari TIA",
+      heroCopy:
+        "Two TIA channels with per-lane selectable timbre. Each timbre shows only the pitches physically available on the chip.",
+      heroChip: "Atari TIA",
+      panelTitle: "TIA Ch.1 / TIA Ch.2",
+    },
+  };
+  const NES_CHANNEL_DEFS = [
+    {
+      id: "pulse1",
+      name: "Pulse 1",
+      chip: "NES_PULSE",
+      profile: "NES",
+      kind: "pitched",
+      waveform: "square",
+      laneClass: "pulse",
+      rowLabel: "Note / Step",
+      supportsIntonation: true,
+      rows: buildNoteRange("C2", "C7"),
+    },
+    {
+      id: "triangle",
+      name: "Triangle",
+      chip: "NES_TRIANGLE",
+      profile: "NES",
+      kind: "pitched",
+      waveform: "triangle",
+      laneClass: "triangle",
+      rowLabel: "Note / Step",
+      supportsIntonation: true,
+      rows: buildNoteRange("C1", "C6"),
+    },
+    {
+      id: "noise",
+      name: "Noise",
+      chip: "NES_NOISE",
+      profile: "NES",
+      kind: "noise",
+      waveform: "noise",
+      laneClass: "noise",
+      rowLabel: "Level / Step",
+      supportsIntonation: false,
+      rows: buildNoiseRows(),
+    },
+  ];
+  const TIA_CHANNEL_DEFS = [
+    { id: "tia1", name: "TIA Ch.1", profile: "TIA" },
+    { id: "tia2", name: "TIA Ch.2", profile: "TIA" },
+  ];
+  const appState = {
+    activeChip: "NES",
+    channelState: {},
+    tiaRowsByAudc: {},
+    bpm: 120,
+    stepCount: 16,
+    loop: false,
+  };
+  const importSession = {
+    parsedSong: null,
+    result: null,
+    overrides: new Map(),
+    voiceStrategy: "highest",
+  };
+  let audioContext = null;
+  let cachedNoiseBuffer = null;
+  let isPlaying = false;
+  let playbackCleanupTimerId = null;
+  let playheadTimerIds = [];
+  let activeStep = null;
+  let copiedExportId = null;
+  let copiedExportTimerId = null;
+  let dragState = null;
+  let suppressNextClick = false;
+  const DRAG_THRESHOLD_PX = 4;
+  const dragPreviewCells = new Set();
+  const activeVoices = new Set();
+
+  resetChannelsForChip("NES");
+
+  playButton.addEventListener("click", () => {
+    void startPlayback();
+  });
+
+  stopButton.addEventListener("click", () => {
+    stopPlayback();
+  });
+
+  loopButton.addEventListener("click", () => {
+    appState.loop = !appState.loop;
+    updateLoopButtonVisual();
+  });
+
+  clearButton.addEventListener("click", () => {
+    clearAllNotes();
+  });
+
+  bpmInput.addEventListener("change", (event) => {
+    handleBpmChange(event);
+  });
+
+  stepCountSelect.addEventListener("change", (event) => {
+    handleStepCountChange(event);
+  });
+
+  importButton.addEventListener("click", openImportPanel);
+  importClose.addEventListener("click", closeImportPanel);
+  importCancel.addEventListener("click", closeImportPanel);
+  importConfirm.addEventListener("click", handleConfirmImport);
+  importFileInput.addEventListener("change", (event) => {
+    void handleImportFileSelected(event);
+  });
+  importDropZone.addEventListener("click", () => importFileInput.click());
+  importDropZone.addEventListener("dragover", handleDragOver);
+  importDropZone.addEventListener("dragleave", handleDragLeave);
+  importDropZone.addEventListener("drop", (event) => {
+    void handleFileDrop(event);
+  });
+  voiceStrategySelect.addEventListener("change", (event) => {
+    handleVoiceStrategyChange(event.target.value);
+  });
+
+  chipSelect.addEventListener("change", (event) => {
+    void handleChipChange(event.target.value);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    void handleGlobalKeydown(event);
+  });
+
+  document.addEventListener("mousemove", handleDocumentMouseMove);
+
+  document.addEventListener("mouseup", (event) => {
+    if (event.button !== 0 || !dragState) {
+      return;
+    }
+
+    const mode = dragState.mode;
+
+    if (mode === "pending") {
+      // Sotto soglia: trattato come click puro, lascio fare al click handler.
+      cleanupDragPreviewVisuals();
+      dragState = null;
+      return;
+    }
+
+    if (mode === "create") {
+      const moved = dragState.startStep !== dragState.currentStep;
+      if (moved) {
+        suppressClickBriefly();
+        void finalizeDragCreate();
+      } else {
+        // Threshold attraversata ma cella invariata (wobble): cleanup e lascio
+        // che il click handler faccia il toggleCell come per un single-click.
+        cleanupDragPreviewVisuals();
+        dragState = null;
+      }
+      return;
+    }
+
+    if (mode === "move-block") {
+      suppressClickBriefly();
+      finalizeMoveBlock();
+      return;
+    }
+
+    if (mode === "move-pitch") {
+      suppressClickBriefly();
+      finalizeMovePitch();
+      return;
+    }
+  });
+
+  function suppressClickBriefly() {
+    suppressNextClick = true;
+    setTimeout(() => {
+      suppressNextClick = false;
+    }, 0);
+  }
+
+  chipSelect.value = appState.activeChip;
+  bpmInput.value = String(appState.bpm);
+  stepCountSelect.value = String(appState.stepCount);
+  updateTransportState();
+  updateLoopButtonVisual();
+  render();
+
+  window.ChipRoll = window.ChipRoll || {};
+  window.ChipRoll.parseMidi = parseMidi;
+  window.ChipRoll.runImportPipeline = runImportPipeline;
+  window.ChipRoll.applyImportToPianoRoll = applyImportToPianoRoll;
+  window.ChipRoll.readFileAsArrayBuffer = readFileAsArrayBuffer;
+  window.ChipRoll.openImportPanel = openImportPanel;
+  window.ChipRoll.getImportSession = () => ({
+    parsedSong: importSession.parsedSong,
+    result: importSession.result,
+    overrides: Object.fromEntries(importSession.overrides),
+    voiceStrategy: importSession.voiceStrategy,
+  });
+
+  function render() {
+    root.innerHTML = "";
+    updateHeaderCopy();
+
+    const channelsStack = document.createElement("div");
+    channelsStack.className = "channels-stack";
+
+    for (const channel of getCurrentChannels()) {
+      channelsStack.appendChild(renderChannel(channel));
+    }
+
+    root.appendChild(channelsStack);
+    root.appendChild(renderExportSection());
+  }
+
+  function updateHeaderCopy() {
+    const copy = CHIP_OPTIONS[appState.activeChip];
+    heroTitle.textContent = copy.heroTitle;
+    heroCopy.textContent = copy.heroCopy;
+    heroChip.textContent = copy.heroChip;
+    panelTitle.textContent = copy.panelTitle;
+  }
+
+  function renderChannel(channel) {
+    const state = appState.channelState[channel.id];
+    const lane = document.createElement("section");
+    lane.className = `channel-lane lane-${channel.laneClass} ${state.collapsed ? "collapsed" : ""}`.trim();
+
+    const laneHeader = document.createElement("div");
+    laneHeader.className = "channel-header";
+
+    const laneTitle = document.createElement("div");
+    laneTitle.className = "channel-title";
+
+    const laneEyebrow = document.createElement("p");
+    laneEyebrow.className = "channel-label";
+    laneEyebrow.textContent = channel.kind === "noise" ? "Percussion" : "Pitched";
+
+    const laneName = document.createElement("h3");
+    laneName.textContent = channel.profile === "TIA"
+      ? `${channel.name} - ${channel.timbreLabel}`
+      : channel.name;
+
+    laneTitle.appendChild(laneEyebrow);
+    laneTitle.appendChild(laneName);
+
+    const laneControls = document.createElement("div");
+    laneControls.className = "channel-controls";
+
+    const collapseButton = document.createElement("button");
+    collapseButton.type = "button";
+    collapseButton.className = "lane-button collapse-button";
+    collapseButton.textContent = state.collapsed ? "^" : "v";
+    collapseButton.setAttribute(
+      "aria-label",
+      state.collapsed ? `Expand ${channel.name}` : `Collapse ${channel.name}`,
+    );
+    collapseButton.addEventListener("click", () => toggleCollapsed(channel.id));
+
+    laneControls.appendChild(collapseButton);
+
+    if (channel.profile === "TIA") {
+      laneControls.appendChild(renderTiaTimbreSelect(channel, state));
+    }
+
+    const muteButton = document.createElement("button");
+    muteButton.type = "button";
+    muteButton.className = `lane-button ${state.muted ? "active" : ""}`.trim();
+    muteButton.textContent = "Mute";
+    muteButton.addEventListener("click", () => toggleMute(channel.id));
+
+    const soloButton = document.createElement("button");
+    soloButton.type = "button";
+    soloButton.className = `lane-button ${state.solo ? "active" : ""}`.trim();
+    soloButton.textContent = "Solo";
+    soloButton.addEventListener("click", () => toggleSolo(channel.id));
+
+    laneControls.appendChild(muteButton);
+    laneControls.appendChild(soloButton);
+
+    laneHeader.appendChild(laneTitle);
+    laneHeader.appendChild(laneControls);
+    lane.appendChild(laneHeader);
+
+    if (state.collapsed) {
+      lane.appendChild(renderCollapsedSummary(channel.id));
+    } else {
+      lane.appendChild(renderGrid(channel, state));
+    }
+
+    return lane;
+  }
+
+  function renderCollapsedSummary(channelId) {
+    const summary = document.createElement("div");
+    summary.className = "collapsed-summary";
+    const noteCount = appState.channelState[channelId].notes.size;
+    summary.textContent = noteCount === 0
+      ? "Lane collapsed. No notes."
+      : `Lane collapsed. ${noteCount} note${noteCount === 1 ? "" : "s"}.`;
+    return summary;
+  }
+
+  function renderExportSection() {
+    const section = document.createElement("section");
+    section.className = "export-section";
+
+    const header = document.createElement("div");
+    header.className = "export-header";
+
+    const titleWrap = document.createElement("div");
+    const label = document.createElement("p");
+    label.className = "panel-label";
+    label.textContent = "Export";
+    const title = document.createElement("h3");
+    title.className = "export-title";
+    title.textContent = "Copy to clipboard";
+    titleWrap.appendChild(label);
+    titleWrap.appendChild(title);
+
+    const description = document.createElement("p");
+    description.className = "export-copy";
+    description.textContent =
+      "Generate text or JSON from the current session — no downloads or extra windows.";
+
+    header.appendChild(titleWrap);
+    header.appendChild(description);
+    section.appendChild(header);
+
+    const buttons = document.createElement("div");
+    buttons.className = "export-buttons";
+
+    if (appState.activeChip === "NES") {
+      buttons.appendChild(
+        renderExportButton("FamiTracker Text", "famitracker", async () => {
+          await copyExportText("famitracker", buildFamiTrackerText());
+        }),
+      );
+      buttons.appendChild(
+        renderExportButton("ca65 Assembly", "ca65", async () => {
+          await copyExportText("ca65", buildCa65Assembly());
+        }),
+      );
+    }
+
+    buttons.appendChild(
+      renderExportButton("Generic JSON", "json", async () => {
+        await copyExportText("json", buildGenericSessionJson());
+      }),
+    );
+
+    section.appendChild(buttons);
+    return section;
+  }
+
+  function renderExportButton(label, exportId, onClick) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "transport-button export-button";
+    button.textContent = copiedExportId === exportId ? "Copied!" : label;
+    button.addEventListener("click", () => {
+      void onClick();
+    });
+    return button;
+  }
+
+  function renderTiaTimbreSelect(channel, state) {
+    const wrapper = document.createElement("label");
+    wrapper.className = "timbre-select-wrap";
+
+    const text = document.createElement("span");
+    text.className = "timbre-select-label";
+    text.textContent = "Timbre";
+
+    const select = document.createElement("select");
+    select.className = "timbre-select";
+    select.setAttribute("data-channel-id", channel.id);
+    select.addEventListener("change", (event) => {
+      changeTiaTimbre(channel.id, Number(event.target.value));
+    });
+
+    for (const option of TIA_TIMBRE_OPTIONS) {
+      const optionElement = document.createElement("option");
+      optionElement.value = String(option.audc);
+      optionElement.textContent = option.label;
+      select.appendChild(optionElement);
+    }
+
+    select.value = String(state.audc);
+
+    wrapper.appendChild(text);
+    wrapper.appendChild(select);
+    return wrapper;
+  }
+
+  function renderGrid(channel, state) {
+    const layout = document.createElement("div");
+    layout.className = "roll-layout";
+
+    const grid = document.createElement("div");
+    grid.className = "roll-grid";
+    grid.style.gridTemplateColumns = `88px repeat(${appState.stepCount}, minmax(0, 1fr))`;
+
+    const corner = document.createElement("div");
+    corner.className = "corner-cell";
+    corner.textContent = channel.rowLabel;
+    grid.appendChild(corner);
+
+    for (let step = 0; step < appState.stepCount; step += 1) {
+      const header = document.createElement("div");
+      header.className = "step-header";
+      header.textContent = String(step + 1).padStart(2, "0");
+      grid.appendChild(header);
+    }
+
+    for (const row of channel.rows) {
+      const label = document.createElement("div");
+      label.className = `note-label ${row.isBlackKey ? "black" : ""}`.trim();
+      label.textContent = row.label;
+      grid.appendChild(label);
+
+      for (let step = 0; step < appState.stepCount; step += 1) {
+        const key = `${row.id}:${step}`;
+        const occupied = state.notes.get(key);
+        // continuesLeft: la cella corrente e' marcata come continuazione e ha
+        // un vicino sinistro nella stessa riga (tipicamente sempre vero per dati ben formati).
+        // continuesRight: il vicino destro nella stessa riga e' marcato come continuazione.
+        let continuesLeft = false;
+        let continuesRight = false;
+        if (occupied) {
+          if (occupied.isContinuation === true && step > 0 && state.notes.has(`${row.id}:${step - 1}`)) {
+            continuesLeft = true;
+          }
+          if (step < appState.stepCount - 1) {
+            const nextEntry = state.notes.get(`${row.id}:${step + 1}`);
+            if (nextEntry && nextEntry.isContinuation === true) {
+              continuesRight = true;
+            }
+          }
+        }
+        const cell = document.createElement("button");
+        cell.type = "button";
+        cell.className = [
+          "grid-cell",
+          channel.laneClass,
+          row.isBlackKey ? "black" : "",
+          occupied ? "occupied" : "",
+          continuesRight ? "continues-right" : "",
+          activeStep === step ? "playing" : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        cell.dataset.cellKey = `${channel.id}:${row.id}:${step}`;
+        cell.setAttribute("aria-label", `${channel.name}, step ${step + 1}, ${row.label}`);
+        cell.addEventListener("mousedown", (event) => {
+          handleCellMouseDown(event, channel, row, step, !!occupied);
+        });
+        cell.addEventListener("mouseenter", () => {
+          handleCellMouseEnter(channel, row, step);
+        });
+        cell.addEventListener("click", () => {
+          if (suppressNextClick) {
+            suppressNextClick = false;
+            return;
+          }
+          void toggleCell(channel, row, step);
+        });
+
+        if (occupied) {
+          cell.appendChild(renderCellContent(channel, occupied, continuesLeft, continuesRight));
+        }
+
+        grid.appendChild(cell);
+      }
+    }
+
+    layout.appendChild(grid);
+    return layout;
+  }
+
+  function renderCellContent(channel, entry, continuesLeft = false, continuesRight = false) {
+    const notePill = document.createElement("div");
+    const continuesClasses = [
+      continuesLeft ? "continues-left" : "",
+      continuesRight ? "continues-right" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    notePill.className = `note-pill channel-${channel.laneClass}${continuesClasses ? ` ${continuesClasses}` : ""}`;
+
+    const title = document.createElement("div");
+    title.className = "note-pill-title";
+    title.textContent = entry.noteName;
+    notePill.appendChild(title);
+
+    if (channel.supportsIntonation && entry.nearest && Number.isFinite(entry.nearest.scarto_cents)) {
+      notePill.className = `${notePill.className} ${getIntonationClassName(entry.nearest.scarto_cents)}`;
+      const subtitle = document.createElement("div");
+      subtitle.className = "note-pill-cents";
+      subtitle.textContent = formatCents(entry.nearest.scarto_cents);
+      notePill.appendChild(subtitle);
+    }
+
+    return notePill;
+  }
+
+  async function toggleCell(channel, row, step) {
+    const state = appState.channelState[channel.id];
+    const key = `${row.id}:${step}`;
+
+    if (state.notes.has(key)) {
+      state.notes.delete(key);
+      console.log(`[ChipRoll] Note removed: ${channel.name} / ${row.label} @ step ${step + 1}`);
+      render();
+      return;
+    }
+
+    clearChannelStep(channel.id, step);
+    const entry = createEntryForCell(channel, row, step);
+    entry.isContinuation = false;
+    state.notes.set(key, entry);
+
+    console.log(`[ChipRoll] Note inserted: ${channel.name} / ${row.label} @ step ${step + 1}`, entry);
+    await previewChannelEntry(channel, entry);
+    render();
+  }
+
+  function createEntryForCell(channel, row, step) {
+    const entry = {
+      step,
+      rowId: row.id,
+      noteName: row.label,
+      waveform: channel.waveform,
+      audc: channel.audc,
+    };
+
+    if (channel.profile === "TIA") {
+      entry.hz = row.outputHz;
+      entry.targetHz = row.targetHz;
+      entry.registro = row.audf;
+
+      if (channel.supportsIntonation) {
+        entry.nearest = createRowIntonation(row.outputHz, row.targetHz);
+      }
+    } else if (channel.kind === "noise") {
+      entry.hz = row.hz;
+      entry.registro = row.noiseIndex ?? 0;
+    } else {
+      entry.hz = row.hz;
+      entry.targetHz = row.hz;
+      entry.nearest = getNearestNote(row.hz, channel.chip);
+      entry.registro = entry.nearest.valore_registro;
+    }
+
+    return entry;
+  }
+
+  function handleCellMouseDown(event, channel, row, step, isOccupied) {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+
+    // Se la cella e' occupata, precalcolo il run a cui appartiene per i modi
+    // move-block / move-pitch. mousedown da solo non avvia ancora nessun modo:
+    // il modo si determina al primo movimento oltre la soglia.
+    const blockSpan = isOccupied ? findRunSpan(channel.id, row.id, step) : null;
+
+    dragState = {
+      mode: "pending",
+      channel,
+      row,
+      channelId: channel.id,
+      rowId: row.id,
+      startStep: step,
+      currentStep: step,
+      hoverStep: step,
+      targetRowId: row.id,
+      targetRow: row,
+      startedOnOccupied: isOccupied,
+      blockSpan,
+      mouseStartX: event.clientX,
+      mouseStartY: event.clientY,
+    };
+    // Niente preview in modo pending (sotto soglia).
+  }
+
+  function handleCellMouseEnter(channel, row, step) {
+    if (!dragState || dragState.mode === "pending") {
+      return;
+    }
+    if (dragState.channelId !== channel.id) {
+      return;
+    }
+
+    if (dragState.mode === "create") {
+      // Create e' row-locked sulla riga di partenza.
+      if (dragState.rowId !== row.id) {
+        return;
+      }
+      if (step === dragState.currentStep) {
+        return;
+      }
+      dragState.currentStep = step;
+      applyDragPreviewVisuals();
+      return;
+    }
+
+    if (dragState.mode === "move-block") {
+      // Movimento orizzontale: traccia lo step puntato (stessa riga).
+      if (dragState.rowId !== row.id) {
+        return;
+      }
+      if (step !== dragState.hoverStep) {
+        dragState.hoverStep = step;
+        applyDragPreviewVisuals();
+      }
+      return;
+    }
+
+    if (dragState.mode === "move-pitch") {
+      // Movimento verticale: traccia la riga puntata, qualsiasi step.
+      if (row.id !== dragState.targetRowId) {
+        dragState.targetRowId = row.id;
+        dragState.targetRow = row;
+        applyDragPreviewVisuals();
+      }
+    }
+  }
+
+  function handleDocumentMouseMove(event) {
+    if (!dragState || dragState.mode !== "pending") {
+      return;
+    }
+
+    const dx = event.clientX - dragState.mouseStartX;
+    const dy = event.clientY - dragState.mouseStartY;
+
+    if (dx * dx + dy * dy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) {
+      return;
+    }
+
+    const horizontalDominant = Math.abs(dx) >= Math.abs(dy);
+
+    if (dragState.startedOnOccupied) {
+      dragState.mode = horizontalDominant ? "move-block" : "move-pitch";
+    } else {
+      // Cella vuota: solo l'orizzontale e' specificato, ma anche un drag verticale
+      // su vuoto cade su create (row-locked) — se l'utente tornera' orizzontale fa
+      // funzionare il fill normalmente. Sotto soglia non era ancora successo nulla.
+      dragState.mode = "create";
+    }
+
+    applyDragPreviewVisuals();
+  }
+
+  function applyDragPreviewVisuals() {
+    cleanupDragPreviewVisuals();
+
+    if (!dragState || dragState.mode === "pending") {
+      return;
+    }
+
+    if (dragState.mode === "create") {
+      const minStep = Math.min(dragState.startStep, dragState.currentStep);
+      const maxStep = Math.max(dragState.startStep, dragState.currentStep);
+      for (let s = minStep; s <= maxStep; s += 1) {
+        addPreviewClassByKey(`${dragState.channelId}:${dragState.rowId}:${s}`, "drag-preview");
+      }
+      return;
+    }
+
+    if (dragState.mode === "move-block") {
+      const { blockSpan, startStep, hoverStep, channelId, rowId } = dragState;
+      const offset = hoverStep - startStep;
+
+      // Sorgente: cella ghost (semitrasparente).
+      for (let s = blockSpan.startStep; s <= blockSpan.endStep; s += 1) {
+        addPreviewClassByKey(`${channelId}:${rowId}:${s}`, "drag-source");
+      }
+      // Target: highlight della destinazione.
+      for (let s = blockSpan.startStep + offset; s <= blockSpan.endStep + offset; s += 1) {
+        addPreviewClassByKey(`${channelId}:${rowId}:${s}`, "drag-preview");
+      }
+      return;
+    }
+
+    if (dragState.mode === "move-pitch") {
+      const { blockSpan, channelId, rowId, targetRowId } = dragState;
+
+      for (let s = blockSpan.startStep; s <= blockSpan.endStep; s += 1) {
+        addPreviewClassByKey(`${channelId}:${rowId}:${s}`, "drag-source");
+      }
+      if (targetRowId !== rowId) {
+        for (let s = blockSpan.startStep; s <= blockSpan.endStep; s += 1) {
+          addPreviewClassByKey(`${channelId}:${targetRowId}:${s}`, "drag-preview");
+        }
+      }
+    }
+  }
+
+  function addPreviewClassByKey(key, className) {
+    const cell = document.querySelector(`[data-cell-key="${CSS.escape(key)}"]`);
+    if (cell) {
+      cell.classList.add(className);
+      dragPreviewCells.add(cell);
+    }
+  }
+
+  function cleanupDragPreviewVisuals() {
+    for (const cell of dragPreviewCells) {
+      cell.classList.remove("drag-preview", "drag-source");
+    }
+    dragPreviewCells.clear();
+  }
+
+  function findRunSpan(channelId, rowId, step) {
+    const state = appState.channelState[channelId];
+    if (!state) {
+      return null;
+    }
+
+    const cur = state.notes.get(`${rowId}:${step}`);
+    if (!cur) {
+      return null;
+    }
+
+    // Vado indietro finche' la cella corrente e' una continuazione e c'e' un vicino.
+    let runStart = step;
+    while (runStart > 0) {
+      const e = state.notes.get(`${rowId}:${runStart}`);
+      if (!e || e.isContinuation !== true) break;
+      const prev = state.notes.get(`${rowId}:${runStart - 1}`);
+      if (!prev) break;
+      runStart -= 1;
+    }
+
+    // Avanti finche' il vicino destro e' continuazione.
+    let runEnd = runStart;
+    while (runEnd + 1 < appState.stepCount) {
+      const next = state.notes.get(`${rowId}:${runEnd + 1}`);
+      if (!next || next.isContinuation !== true) break;
+      runEnd += 1;
+    }
+
+    return { startStep: runStart, endStep: runEnd };
+  }
+
+  async function finalizeDragCreate() {
+    if (!dragState || dragState.mode !== "create") {
+      return;
+    }
+
+    const { channel, row, channelId, startStep, currentStep } = dragState;
+    const state = appState.channelState[channelId];
+    const minStep = Math.min(startStep, currentStep);
+    const maxStep = Math.max(startStep, currentStep);
+
+    cleanupDragPreviewVisuals();
+    dragState = null;
+
+    if (minStep === maxStep) {
+      return;
+    }
+
+    let firstInsertedEntry = null;
+    let insertedCount = 0;
+    let lastInsertedStep = -2;
+
+    for (let s = minStep; s <= maxStep; s += 1) {
+      const cellKey = `${row.id}:${s}`;
+
+      if (state.notes.has(cellKey)) {
+        continue;
+      }
+
+      clearChannelStep(channelId, s);
+      const entry = createEntryForCell(channel, row, s);
+      entry.isContinuation = lastInsertedStep === s - 1;
+      state.notes.set(cellKey, entry);
+      insertedCount += 1;
+      lastInsertedStep = s;
+
+      if (!firstInsertedEntry) {
+        firstInsertedEntry = entry;
+      }
+    }
+
+    if (firstInsertedEntry) {
+      console.log(
+        `[ChipRoll] Drag create: ${insertedCount} notes on ${channel.name} / ${row.label} (steps ${minStep + 1}..${maxStep + 1})`,
+      );
+      await previewChannelEntry(channel, firstInsertedEntry);
+    }
+
+    render();
+  }
+
+  function finalizeMoveBlock() {
+    if (!dragState || dragState.mode !== "move-block" || !dragState.blockSpan) {
+      cleanupDragPreviewVisuals();
+      dragState = null;
+      return;
+    }
+
+    const { channel, channelId, rowId, blockSpan, startStep, hoverStep } = dragState;
+    const state = appState.channelState[channelId];
+    const offset = hoverStep - startStep;
+
+    cleanupDragPreviewVisuals();
+    dragState = null;
+
+    if (offset === 0) {
+      render();
+      return;
+    }
+
+    const newStart = blockSpan.startStep + offset;
+    const newEnd = blockSpan.endStep + offset;
+
+    if (newStart < 0 || newEnd >= appState.stepCount) {
+      console.log("[ChipRoll] Move-block blocked: out of grid.");
+      render();
+      return;
+    }
+
+    // Cattura entry source con offset relativo, poi cancella source.
+    const captured = [];
+    for (let s = blockSpan.startStep; s <= blockSpan.endStep; s += 1) {
+      const e = state.notes.get(`${rowId}:${s}`);
+      if (e) {
+        captured.push({ relStep: s - blockSpan.startStep, entry: e });
+      }
+      state.notes.delete(`${rowId}:${s}`);
+    }
+
+    // Per ogni nuova posizione: clearChannelStep prima del set (stesso pattern di
+    // toggleCell). Cosi' qualsiasi nota su altre righe (o stessa riga fuori dal
+    // source range) viene sovrascritta silenziosamente, preservando l'invariante
+    // canale-monofonico-per-step.
+    let overwrittenCount = 0;
+    for (const { relStep, entry } of captured) {
+      const newStep = newStart + relStep;
+      if (getEntryForStep(channelId, newStep)) {
+        overwrittenCount += 1;
+      }
+      clearChannelStep(channelId, newStep);
+      state.notes.set(`${rowId}:${newStep}`, { ...entry, step: newStep });
+    }
+
+    console.log(
+      `[ChipRoll] Move-block: ${channel.name} / ${rowId} steps ${blockSpan.startStep + 1}..${blockSpan.endStep + 1} -> ${newStart + 1}..${newEnd + 1}` +
+        (overwrittenCount > 0 ? ` (${overwrittenCount} pre-existing cell${overwrittenCount === 1 ? "" : "s"} overwritten)` : ""),
+    );
+    render();
+  }
+
+  function finalizeMovePitch() {
+    if (!dragState || dragState.mode !== "move-pitch" || !dragState.blockSpan) {
+      cleanupDragPreviewVisuals();
+      dragState = null;
+      return;
+    }
+
+    const { channel, channelId, row, rowId, blockSpan, targetRowId, targetRow } = dragState;
+    const state = appState.channelState[channelId];
+
+    cleanupDragPreviewVisuals();
+    dragState = null;
+
+    if (targetRowId === rowId) {
+      render();
+      return;
+    }
+
+    // Catturo solo il pattern di isContinuation (l'hz/registro/nearest cambiano
+    // perche' la riga e' diversa: vanno ricreati). Cancello la source row.
+    const continuationPattern = [];
+    for (let s = blockSpan.startStep; s <= blockSpan.endStep; s += 1) {
+      const e = state.notes.get(`${rowId}:${s}`);
+      continuationPattern.push(e?.isContinuation === true);
+      state.notes.delete(`${rowId}:${s}`);
+    }
+
+    // Scrivo target row con clearChannelStep (per coerenza con toggleCell).
+    // Sotto l'invariante monofonica gli step sono gia' vuoti dopo la delete del source,
+    // quindi il clear non rimuove nulla; resta come safety net contro regressioni.
+    let firstEntry = null;
+    for (let i = 0; i < continuationPattern.length; i += 1) {
+      const step = blockSpan.startStep + i;
+      clearChannelStep(channelId, step);
+      const newEntry = createEntryForCell(channel, targetRow, step);
+      newEntry.isContinuation = continuationPattern[i];
+      state.notes.set(`${targetRowId}:${step}`, newEntry);
+      if (!firstEntry) firstEntry = newEntry;
+    }
+
+    console.log(
+      `[ChipRoll] Move-pitch: ${channel.name} row ${row.label} -> ${targetRow.label} (steps ${blockSpan.startStep + 1}..${blockSpan.endStep + 1})`,
+    );
+    render();
+
+    if (firstEntry) {
+      void previewChannelEntry(channel, firstEntry);
+    }
+  }
+
+  async function previewChannelEntry(channel, entry) {
+    if (!isChannelAudible(channel.id)) {
+      return;
+    }
+
+    if (!isFinitePositive(entry.hz)) {
+      console.warn("[ChipRoll] Preview skipped: invalid frequency", { channel, entry });
+      return;
+    }
+
+    const context = await ensureAudioContext();
+    const startTime = context.currentTime;
+    schedulePlaybackVoice(context, channel.waveform, entry.hz, startTime, PREVIEW_DURATION_SECONDS);
+  }
+
+  async function startPlayback() {
+    stopPlayback();
+
+    const context = await ensureAudioContext();
+    isPlaying = true;
+    updateTransportState();
+
+    const schedulerOffsetSeconds = 0.03;
+    scheduleOneCycle(context, context.currentTime + schedulerOffsetSeconds);
+  }
+
+  function scheduleOneCycle(context, sequenceStartTime) {
+    const stepDurationSeconds = getStepDurationSeconds();
+    const stepCount = appState.stepCount;
+
+    // Voice scheduling per canale, con run merging: una nota tenuta per piu'
+    // step consecutivi (drag) scheda una sola voce con durata estesa, cosi'
+    // l'inviluppo attack/release della Web Audio API non ricomincia ogni step.
+    for (const channel of getCurrentChannels()) {
+      if (!isChannelAudible(channel.id)) {
+        continue;
+      }
+
+      let step = 0;
+      while (step < stepCount) {
+        const entry = getEntryForStep(channel.id, step);
+
+        if (!entry) {
+          step += 1;
+          continue;
+        }
+
+        if (!isFinitePositive(entry.hz)) {
+          console.warn("[ChipRoll] Playback skipped: invalid frequency", { channel, entry });
+          step += 1;
+          continue;
+        }
+
+        // Run = nota corrente + tutte le successive che la marcano come continuazione,
+        // restando sulla stessa riga.
+        let runLength = 1;
+        while (step + runLength < stepCount) {
+          const next = getEntryForStep(channel.id, step + runLength);
+          if (!next) break;
+          if (next.rowId !== entry.rowId) break;
+          if (next.isContinuation !== true) break;
+          runLength += 1;
+        }
+
+        const stepStartTime = sequenceStartTime + step * stepDurationSeconds;
+        const runDurationSeconds = runLength * stepDurationSeconds;
+        schedulePlaybackVoice(
+          context,
+          channel.waveform,
+          entry.hz,
+          stepStartTime,
+          runDurationSeconds,
+        );
+
+        step += runLength;
+      }
+    }
+
+    // Playhead per step (visualizzazione: lo step attivo si muove ogni stepDur).
+    for (let step = 0; step < stepCount; step += 1) {
+      const stepStartTime = sequenceStartTime + step * stepDurationSeconds;
+      const playheadTimerId = window.setTimeout(() => {
+        activeStep = step;
+        render();
+      }, Math.max(0, (stepStartTime - context.currentTime) * 1000));
+
+      playheadTimerIds.push(playheadTimerId);
+    }
+
+    const cycleEndTime = sequenceStartTime + stepCount * stepDurationSeconds;
+    playbackCleanupTimerId = window.setTimeout(() => {
+      if (appState.loop && isPlaying) {
+        // Riparte all'istante di fine ciclo: niente gap audio, lo scheduler accoda
+        // direttamente la prossima passata sui timestamp futuri.
+        scheduleOneCycle(context, cycleEndTime);
+      } else {
+        finishPlayback();
+      }
+    }, Math.max(0, Math.ceil((cycleEndTime - context.currentTime) * 1000)));
+  }
+
+  function schedulePlaybackVoice(context, waveform, hz, startTime, durationSeconds) {
+    if (waveform === "square") {
+      scheduleSquareNote(context, {
+        frequency: hz,
+        startTime,
+        durationSeconds,
+        destination: context.destination,
+      });
+      return;
+    }
+
+    if (waveform === "triangle") {
+      scheduleTriangleNote(context, {
+        frequency: hz,
+        startTime,
+        durationSeconds,
+        destination: context.destination,
+      });
+      return;
+    }
+
+    scheduleNoiseBurst(context, {
+      startTime,
+      durationSeconds,
+      destination: context.destination,
+    });
+  }
+
+  function stopPlayback() {
+    if (!isPlaying && activeStep === null && activeVoices.size === 0) {
+      return;
+    }
+
+    clearPlaybackTimers();
+    stopAllActiveVoices();
+    finishPlayback();
+  }
+
+  function finishPlayback() {
+    clearPlaybackTimers();
+    activeStep = null;
+    isPlaying = false;
+    updateTransportState();
+    render();
+  }
+
+  function clearPlaybackTimers() {
+    if (playbackCleanupTimerId !== null) {
+      window.clearTimeout(playbackCleanupTimerId);
+      playbackCleanupTimerId = null;
+    }
+
+    for (const timerId of playheadTimerIds) {
+      window.clearTimeout(timerId);
+    }
+
+    playheadTimerIds = [];
+  }
+
+  function stopAllActiveVoices() {
+    for (const voice of [...activeVoices]) {
+      try {
+        voice.source.stop();
+      } catch (error) {
+        cleanupVoice(voice);
+      }
+    }
+  }
+
+  async function ensureAudioContext() {
+    if (!audioContext) {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+
+      if (!AudioContextClass) {
+        throw new Error("Web Audio API not supported in this browser");
+      }
+
+      audioContext = new AudioContextClass();
+    }
+
+    if (audioContext.state === "suspended") {
+      await audioContext.resume();
+    }
+
+    return audioContext;
+  }
+
+  function scheduleSquareNote(context, { frequency, startTime, durationSeconds, destination }) {
+    const oscillator = context.createOscillator();
+    const gainNode = context.createGain();
+    const releaseSeconds = Math.min(RELEASE_SECONDS, Math.max(0.02, durationSeconds * 0.4));
+    const peakGain = 0.18;
+    const sustainEndTime = Math.max(
+      startTime + ATTACK_SECONDS,
+      startTime + durationSeconds - releaseSeconds,
+    );
+    const stopTime = sustainEndTime + releaseSeconds;
+
+    oscillator.type = "square";
+    oscillator.frequency.setValueAtTime(frequency, startTime);
+    gainNode.gain.setValueAtTime(0.0001, startTime);
+    gainNode.gain.linearRampToValueAtTime(peakGain, startTime + ATTACK_SECONDS);
+    gainNode.gain.setValueAtTime(peakGain, sustainEndTime);
+    gainNode.gain.linearRampToValueAtTime(0.0001, stopTime);
+
+    oscillator.connect(gainNode);
+    gainNode.connect(destination);
+    oscillator.start(startTime);
+    oscillator.stop(stopTime);
+
+    registerVoice(oscillator, [oscillator, gainNode]);
+  }
+
+  function scheduleTriangleNote(context, { frequency, startTime, durationSeconds, destination }) {
+    const oscillator = context.createOscillator();
+    oscillator.type = "triangle";
+    oscillator.frequency.setValueAtTime(frequency, startTime);
+    oscillator.connect(destination);
+    oscillator.start(startTime);
+    oscillator.stop(startTime + durationSeconds);
+
+    registerVoice(oscillator, [oscillator]);
+  }
+
+  function scheduleNoiseBurst(context, { startTime, durationSeconds, destination }) {
+    const source = context.createBufferSource();
+    const gainNode = context.createGain();
+    const noiseBuffer = getNoiseBuffer(context);
+    const releaseSeconds = Math.min(RELEASE_SECONDS, Math.max(0.02, durationSeconds * 0.45));
+    const sustainEndTime = Math.max(
+      startTime + ATTACK_SECONDS,
+      startTime + durationSeconds - releaseSeconds,
+    );
+    const stopTime = sustainEndTime + releaseSeconds;
+
+    source.buffer = noiseBuffer;
+    source.loop = true;
+    gainNode.gain.setValueAtTime(0.0001, startTime);
+    gainNode.gain.linearRampToValueAtTime(0.14, startTime + ATTACK_SECONDS);
+    gainNode.gain.setValueAtTime(0.14, sustainEndTime);
+    gainNode.gain.linearRampToValueAtTime(0.0001, stopTime);
+
+    source.connect(gainNode);
+    gainNode.connect(destination);
+    source.start(startTime);
+    source.stop(stopTime);
+
+    registerVoice(source, [source, gainNode]);
+  }
+
+  function getNoiseBuffer(context) {
+    if (cachedNoiseBuffer && cachedNoiseBuffer.sampleRate === context.sampleRate) {
+      return cachedNoiseBuffer;
+    }
+
+    const bufferLength = Math.max(1, Math.floor(context.sampleRate * 0.25));
+    const buffer = context.createBuffer(1, bufferLength, context.sampleRate);
+    const channelData = buffer.getChannelData(0);
+
+    for (let index = 0; index < bufferLength; index += 1) {
+      channelData[index] = Math.random() * 2 - 1;
+    }
+
+    cachedNoiseBuffer = buffer;
+    return buffer;
+  }
+
+  function registerVoice(source, nodesToDisconnect) {
+    const voice = { source, nodesToDisconnect };
+    activeVoices.add(voice);
+
+    source.addEventListener("ended", () => {
+      cleanupVoice(voice);
+    });
+  }
+
+  function cleanupVoice(voice) {
+    if (!activeVoices.has(voice)) {
+      return;
+    }
+
+    activeVoices.delete(voice);
+
+    for (const node of voice.nodesToDisconnect) {
+      try {
+        node.disconnect();
+      } catch (error) {
+        // Ignore duplicate disconnect attempts.
+      }
+    }
+  }
+
+  function getEntryForStep(channelId, step) {
+    for (const entry of appState.channelState[channelId].notes.values()) {
+      if (entry.step === step) {
+        return entry;
+      }
+    }
+
+    return null;
+  }
+
+  function clearChannelStep(channelId, step) {
+    const state = appState.channelState[channelId];
+
+    if (!state) {
+      return;
+    }
+
+    for (const [mapKey, value] of state.notes.entries()) {
+      if (value.step === step) {
+        state.notes.delete(mapKey);
+      }
+    }
+  }
+
+  async function handleChipChange(nextChip) {
+    if (nextChip === appState.activeChip) {
+      return;
+    }
+
+    stopPlayback();
+    appState.activeChip = nextChip;
+    resetChannelsForChip(nextChip);
+    render();
+
+    if (importSession.parsedSong) {
+      // I canali validi cambiano col chip: gli override pre-esistenti diventano invalidi.
+      importSession.overrides.clear();
+      runAndRenderPipeline();
+    }
+  }
+
+  function resetChannelsForChip(chip) {
+    if (chip === "NES") {
+      appState.channelState = Object.fromEntries(
+        NES_CHANNEL_DEFS.map((channel) => [
+          channel.id,
+          {
+            notes: new Map(),
+            muted: false,
+            solo: false,
+            collapsed: false,
+          },
+        ]),
+      );
+      return;
+    }
+
+    appState.tiaRowsByAudc = {
+      12: buildTiaRows(12),
+      1: buildTiaRows(1),
+      8: buildTiaRows(8),
+    };
+    appState.channelState = Object.fromEntries(
+      TIA_CHANNEL_DEFS.map((channel) => [
+        channel.id,
+        {
+          notes: new Map(),
+          muted: false,
+          solo: false,
+          audc: 12,
+          collapsed: false,
+        },
+      ]),
+    );
+  }
+
+  function getCurrentChannels() {
+    if (appState.activeChip === "NES") {
+      return NES_CHANNEL_DEFS;
+    }
+
+    return TIA_CHANNEL_DEFS.map((channel) => {
+      const state = appState.channelState[channel.id];
+      const audc = state.audc;
+      const timbre = TIA_TIMBRE_OPTIONS.find((option) => option.audc === audc);
+
+      return {
+        ...channel,
+        chip: "TIA",
+        audc,
+        timbreLabel: timbre.label,
+        kind: audc === 8 ? "noise" : "pitched",
+        waveform: audc === 8 ? "noise" : "square",
+        laneClass: getTiaLaneClass(audc),
+        rowLabel: audc === 8 ? "Noise / Step" : "Note / Step",
+        supportsIntonation: audc !== 8,
+        rows: appState.tiaRowsByAudc[audc],
+      };
+    });
+  }
+
+  function getTiaLaneClass(audc) {
+    switch (audc) {
+      case 12:
+        return "tia-tone";
+      case 1:
+        return "tia-buzz";
+      case 8:
+        return "tia-noise";
+      default:
+        return "tia-tone";
+    }
+  }
+
+  function changeTiaTimbre(channelId, audc) {
+    const state = appState.channelState[channelId];
+
+    if (!state || !appState.tiaRowsByAudc[audc]) {
+      return;
+    }
+
+    state.audc = audc;
+    state.notes.clear();
+    render();
+  }
+
+  function toggleMute(channelId) {
+    if (!appState.channelState[channelId]) {
+      return;
+    }
+
+    appState.channelState[channelId].muted = !appState.channelState[channelId].muted;
+    render();
+  }
+
+  function toggleSolo(channelId) {
+    if (!appState.channelState[channelId]) {
+      return;
+    }
+
+    appState.channelState[channelId].solo = !appState.channelState[channelId].solo;
+    render();
+  }
+
+  function toggleCollapsed(channelId) {
+    if (!appState.channelState[channelId]) {
+      return;
+    }
+
+    appState.channelState[channelId].collapsed = !appState.channelState[channelId].collapsed;
+    render();
+  }
+
+  function isChannelAudible(channelId) {
+    const currentChannels = getCurrentChannels();
+    const anySolo = currentChannels.some((channel) => appState.channelState[channel.id].solo);
+    const state = appState.channelState[channelId];
+
+    if (state.muted) {
+      return false;
+    }
+
+    if (!anySolo) {
+      return true;
+    }
+
+    return state.solo;
+  }
+
+  function clearAllNotes() {
+    const confirmed = window.confirm("Clear all notes?");
+
+    if (!confirmed) {
+      return;
+    }
+
+    for (const channelId of Object.keys(appState.channelState)) {
+      appState.channelState[channelId].notes.clear();
+    }
+
+    render();
+  }
+
+  async function copyExportText(exportId, text) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (error) {
+        legacyCopyText(text);
+      }
+    } else {
+      legacyCopyText(text);
+    }
+
+    copiedExportId = exportId;
+
+    if (copiedExportTimerId !== null) {
+      window.clearTimeout(copiedExportTimerId);
+    }
+
+    copiedExportTimerId = window.setTimeout(() => {
+      copiedExportId = null;
+      copiedExportTimerId = null;
+      render();
+    }, 1500);
+
+    render();
+  }
+
+  function legacyCopyText(text) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "absolute";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
+  }
+
+  function runImportPipeline(parsedSong, chip, voiceStrategy = "highest") {
+    if (!parsedSong || !Array.isArray(parsedSong.tracks)) {
+      throw new Error("runImportPipeline requires a valid ParsedSong");
+    }
+
+    if (!VOICE_STRATEGIES.includes(voiceStrategy)) {
+      throw new Error(`Unsupported voice strategy: ${voiceStrategy}`);
+    }
+
+    // Tag con indice originale per correlare l'output di assignTracks alle tracce iniziali
+    // (UI: dropdown override per traccia). Reduce e quantize spread-ano i campi, quindi
+    // __sourceIndex sopravvive lungo la pipeline.
+    const tagged = parsedSong.tracks.map((track, idx) => ({ ...track, __sourceIndex: idx }));
+
+    // Reduce in tick domain (preserva la precisione delle sovrapposizioni reali).
+    const reduced = tagged.map((track) => reduceTrack(track, voiceStrategy));
+
+    // Quantize dopo reduce: ogni segmento risultante ottiene step/duration coerenti.
+    const quantized = reduced.map((track) => quantizeTrack(track, parsedSong.ppq));
+
+    return assignTracks(quantized, chip);
+  }
+
+  function openImportPanel() {
+    importOverlay.classList.remove("hidden");
+    importOverlay.setAttribute("aria-hidden", "false");
+  }
+
+  function closeImportPanel() {
+    importOverlay.classList.add("hidden");
+    importOverlay.setAttribute("aria-hidden", "true");
+    resetImportSession();
+  }
+
+  function resetImportSession() {
+    importSession.parsedSong = null;
+    importSession.result = null;
+    importSession.overrides.clear();
+    importSession.voiceStrategy = "highest";
+    voiceStrategySelect.value = "highest";
+    importTracksList.innerHTML = "";
+    importUnassignedList.innerHTML = "";
+    importSummary.textContent = "";
+    importStatus.textContent = "";
+    importControls.classList.add("hidden");
+    importDropZone.classList.remove("hidden");
+    importDropZone.classList.remove("dragging");
+    importConfirm.disabled = true;
+    importFileInput.value = "";
+  }
+
+  async function handleImportFileSelected(event) {
+    const file = event.target.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    await loadMidiFile(file);
+    event.target.value = "";
+  }
+
+  function handleDragOver(event) {
+    event.preventDefault();
+    importDropZone.classList.add("dragging");
+  }
+
+  function handleDragLeave() {
+    importDropZone.classList.remove("dragging");
+  }
+
+  async function handleFileDrop(event) {
+    event.preventDefault();
+    importDropZone.classList.remove("dragging");
+    const file = event.dataTransfer?.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    await loadMidiFile(file);
+  }
+
+  async function loadMidiFile(file) {
+    importStatus.textContent = `Parsing "${file.name}"...`;
+
+    try {
+      const buffer = await readFileAsArrayBuffer(file);
+      const parsedSong = await parseMidi(buffer);
+      importSession.parsedSong = parsedSong;
+      importSession.overrides.clear();
+      console.log("[ChipRoll Import] ParsedSong", parsedSong);
+      runAndRenderPipeline();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      importStatus.textContent = `Parse error: ${message}`;
+      console.error("[ChipRoll Import] MIDI parse error", error);
+    }
+  }
+
+  function runAndRenderPipeline() {
+    if (!importSession.parsedSong) {
+      return;
+    }
+
+    try {
+      importSession.result = runImportPipeline(
+        importSession.parsedSong,
+        appState.activeChip,
+        importSession.voiceStrategy,
+      );
+      console.log("[ChipRoll Import] pipeline ->", importSession.result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      importStatus.textContent = `Pipeline error: ${message}`;
+      console.error("[ChipRoll Import] Pipeline error", error);
+      return;
+    }
+
+    renderImportPreview();
+  }
+
+  function renderImportPreview() {
+    const { result, parsedSong } = importSession;
+
+    if (!result || !parsedSong) {
+      return;
+    }
+
+    importDropZone.classList.add("hidden");
+    importControls.classList.remove("hidden");
+    importStatus.textContent = "";
+
+    const total = parsedSong.tracks.length;
+    const assignedCount = result.assigned.length;
+    const unassignedCount = result.unassigned.length;
+    importSummary.textContent =
+      `${total} track${total === 1 ? "" : "s"} detected (${assignedCount} assigned, ${unassignedCount} unassigned). ` +
+      `BPM: ${Math.round(parsedSong.bpm)}, PPQ: ${parsedSong.ppq}.`;
+
+    importTracksList.innerHTML = "";
+    if (assignedCount === 0) {
+      const empty = document.createElement("p");
+      empty.className = "import-empty";
+      empty.textContent = "No track can be assigned to this chip.";
+      importTracksList.appendChild(empty);
+    }
+    for (const entry of result.assigned) {
+      importTracksList.appendChild(renderImportTrackRow(entry));
+    }
+
+    importUnassignedList.innerHTML = "";
+    if (unassignedCount > 0) {
+      const heading = document.createElement("h3");
+      heading.className = "import-unassigned-heading";
+      heading.textContent = `Unassigned tracks (${unassignedCount})`;
+      importUnassignedList.appendChild(heading);
+
+      const list = document.createElement("ul");
+      list.className = "import-unassigned-list";
+      for (const item of result.unassigned) {
+        const li = document.createElement("li");
+        const trackName = item.track.name || "Untitled";
+        const family = item.track.isPercussion
+          ? "Ch.9 - Drums"
+          : `GM ${item.track.gmProgram ?? 0} - ${getGmFamily(item.track.gmProgram, item.track.isPercussion)}`;
+        li.innerHTML = `<strong>"${escapeHtml(trackName)}"</strong> <span class="import-unassigned-meta">(${escapeHtml(family)})</span> &mdash; ${escapeHtml(item.reason)}`;
+        list.appendChild(li);
+      }
+      importUnassignedList.appendChild(list);
+    }
+
+    importConfirm.disabled = assignedCount === 0;
+  }
+
+  function renderImportTrackRow(entry) {
+    const trackIdx = entry.track.__sourceIndex;
+    const originalTrack = importSession.parsedSong.tracks[trackIdx];
+    const override = importSession.overrides.get(trackIdx) || {};
+    const currentPersonality = override.personality ?? entry.personality;
+    const currentChannel = override.channel ?? entry.channel;
+
+    const row = document.createElement("section");
+    row.className = "import-track-row";
+
+    const head = document.createElement("div");
+    head.className = "import-track-head";
+
+    const name = document.createElement("p");
+    name.className = "import-track-name";
+    name.textContent = `Track ${trackIdx + 1}: "${originalTrack.name || "Untitled"}"`;
+
+    const noteCount = originalTrack.notes.length;
+    const noteWord = `${noteCount} note${noteCount === 1 ? "" : "s"}`;
+
+    const meta = document.createElement("p");
+    meta.className = "import-track-meta";
+    meta.textContent = originalTrack.isPercussion
+      ? `Ch.9 - Drums - ${noteWord}`
+      : `GM ${originalTrack.gmProgram ?? 0} - ${getGmFamily(originalTrack.gmProgram, originalTrack.isPercussion)} - ${noteWord}`;
+
+    head.appendChild(name);
+    head.appendChild(meta);
+    row.appendChild(head);
+
+    const controls = document.createElement("div");
+    controls.className = "import-track-controls";
+    controls.appendChild(buildPersonalityDropdown(trackIdx, currentPersonality));
+    controls.appendChild(buildChannelDropdown(trackIdx, currentChannel));
+    row.appendChild(controls);
+
+    return row;
+  }
+
+  function buildPersonalityDropdown(trackIdx, currentValue) {
+    return buildLabeledSelect("Personality", PERSONALITIES, currentValue, (value) => {
+      const existing = importSession.overrides.get(trackIdx) || {};
+      importSession.overrides.set(trackIdx, { ...existing, personality: value });
+    });
+  }
+
+  function buildChannelDropdown(trackIdx, currentValue) {
+    const channelMap = appState.activeChip === "NES" ? NES_CHANNEL_LABELS : TIA_CHANNEL_LABELS;
+    const ids = Object.keys(channelMap);
+    return buildLabeledSelect("Channel", ids, currentValue, (value) => {
+      const existing = importSession.overrides.get(trackIdx) || {};
+      importSession.overrides.set(trackIdx, { ...existing, channel: value });
+    }, (id) => channelMap[id] ?? id);
+  }
+
+  function buildLabeledSelect(labelText, values, currentValue, onChange, formatLabel = (v) => v) {
+    const wrap = document.createElement("label");
+    wrap.className = "meta-control import-track-control";
+    const span = document.createElement("span");
+    span.className = "meta-control-label";
+    span.textContent = labelText;
+    wrap.appendChild(span);
+
+    const select = document.createElement("select");
+    select.className = "meta-select";
+    let hasCurrent = false;
+    for (const value of values) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = formatLabel(value);
+      if (value === currentValue) {
+        option.selected = true;
+        hasCurrent = true;
+      }
+      select.appendChild(option);
+    }
+    if (!hasCurrent && currentValue !== undefined && currentValue !== null) {
+      // Override esterno non in lista: aggiungilo per non perderlo.
+      const option = document.createElement("option");
+      option.value = currentValue;
+      option.textContent = formatLabel(currentValue);
+      option.selected = true;
+      select.appendChild(option);
+    }
+    select.addEventListener("change", (event) => onChange(event.target.value));
+    wrap.appendChild(select);
+    return wrap;
+  }
+
+  function handleVoiceStrategyChange(value) {
+    if (!VOICE_STRATEGIES.includes(value)) {
+      voiceStrategySelect.value = importSession.voiceStrategy;
+      return;
+    }
+
+    if (value === importSession.voiceStrategy) {
+      return;
+    }
+
+    importSession.voiceStrategy = value;
+    // Le overrides utente sopravvivono: il numero/posizione delle tracce non cambia,
+    // cambia solo come la polifonia viene ridotta dentro ogni traccia.
+    runAndRenderPipeline();
+  }
+
+  function handleConfirmImport() {
+    if (!importSession.result) {
+      return;
+    }
+
+    if (hasExistingPianoRollNotes()) {
+      const ok = window.confirm(
+        "The piano roll already contains notes. Importing will overwrite them. Proceed?",
+      );
+
+      if (!ok) {
+        return;
+      }
+    }
+
+    const finalAssignments = importSession.result.assigned.map((entry) => {
+      const trackIdx = entry.track.__sourceIndex;
+      const override = importSession.overrides.get(trackIdx) || {};
+      return {
+        sourceIndex: trackIdx,
+        track: entry.track,
+        channel: override.channel ?? entry.channel,
+        personality: override.personality ?? entry.personality,
+      };
+    });
+
+    const payload = {
+      chip: appState.activeChip,
+      bpm: Math.round(importSession.parsedSong.bpm),
+      ppq: importSession.parsedSong.ppq,
+      voiceStrategy: importSession.voiceStrategy,
+      finalAssignments,
+      unassigned: importSession.result.unassigned,
+    };
+
+    console.log("[ChipRoll Import] confirmed mapping:", payload);
+    window.ChipRoll.lastImportMapping = payload;
+
+    applyImportToPianoRoll(payload);
+
+    closeImportPanel();
+  }
+
+  function applyImportToPianoRoll(payload) {
+    if (!payload || !Array.isArray(payload.finalAssignments)) {
+      console.warn("[ChipRoll Import] applyImportToPianoRoll: invalid payload");
+      return { warnings: ["Invalid payload."], notesWritten: 0 };
+    }
+
+    stopPlayback();
+
+    // BPM dell'import: clamp negli stessi limiti dell'input UI.
+    const newBpm = Math.max(BPM_MIN, Math.min(BPM_MAX, Math.round(payload.bpm || 120)));
+    appState.bpm = newBpm;
+    bpmInput.value = String(newBpm);
+
+    // Switch chip se diverso (resetta tutto lo stato dei canali);
+    // altrimenti svuota le note di ogni canale in-place per "sovrascrivere".
+    if (payload.chip && payload.chip !== appState.activeChip) {
+      appState.activeChip = payload.chip;
+      chipSelect.value = payload.chip;
+      resetChannelsForChip(payload.chip);
+    } else {
+      for (const id of Object.keys(appState.channelState)) {
+        appState.channelState[id].notes.clear();
+      }
+    }
+
+    const warnings = [];
+    let totalNotesWritten = 0;
+
+    for (const assignment of payload.finalAssignments) {
+      const result = writeAssignmentToChannel(assignment);
+      warnings.push(...result.warnings);
+      totalNotesWritten += result.notesWritten;
+    }
+
+    for (const item of payload.unassigned || []) {
+      const trackName = item.track?.name || "Untitled";
+      warnings.push(`Track "${trackName}" unassigned: ${item.reason}`);
+    }
+
+    render();
+
+    console.log("[ChipRoll Import] Import applied.", {
+      chip: appState.activeChip,
+      bpm: appState.bpm,
+      stepCount: appState.stepCount,
+      notesWritten: totalNotesWritten,
+      warnings: warnings.length,
+    });
+
+    if (warnings.length > 0) {
+      console.warn("[ChipRoll Import] Warnings:");
+      for (const w of warnings) {
+        console.warn(`  - ${w}`);
+      }
+
+      const summary = warnings.slice(0, 5).join("\n");
+      const more = warnings.length > 5 ? `\n... and ${warnings.length - 5} more (see console).` : "";
+      window.alert(`Import finished with ${warnings.length} warning${warnings.length === 1 ? "" : "s"}:\n\n${summary}${more}`);
+    }
+
+    return { warnings, notesWritten: totalNotesWritten };
+  }
+
+  function writeAssignmentToChannel(assignment) {
+    const warnings = [];
+    let notesWritten = 0;
+    const { track, channel: channelId, personality } = assignment;
+
+    const state = appState.channelState[channelId];
+
+    if (!state) {
+      warnings.push(`Channel ${channelId} not available on the ${appState.activeChip} chip. Skipped.`);
+      return { warnings, notesWritten };
+    }
+
+    // For TIA, AUDC depends on the chosen personality: Pure Tone / Buzz / Noise.
+    if (appState.activeChip === "TIA") {
+      state.audc = personalityToAudc(personality);
+    }
+
+    const channelDef = getCurrentChannels().find((c) => c.id === channelId);
+
+    if (!channelDef) {
+      warnings.push(`Channel ${channelId} not found after AUDC update.`);
+      return { warnings, notesWritten };
+    }
+
+    let droppedOutOfGrid = 0;
+    let clippedAtBoundary = 0;
+
+    for (const note of track.notes || []) {
+      if (!Number.isInteger(note.step) || note.step < 0) {
+        continue;
+      }
+
+      if (note.step >= appState.stepCount) {
+        droppedOutOfGrid += 1;
+        continue;
+      }
+
+      let duration = Math.max(1, Number.isInteger(note.duration) ? note.duration : 1);
+
+      if (note.step + duration > appState.stepCount) {
+        duration = appState.stepCount - note.step;
+        clippedAtBoundary += 1;
+      }
+
+      const row = pickRowForNote(channelDef, note);
+
+      if (!row) {
+        warnings.push(`Pitch ${note.pitch} on ${channelDef.name}: no row available.`);
+        continue;
+      }
+
+      notesWritten += insertImportedRun(channelDef, state, row, note.step, duration);
+    }
+
+    if (droppedOutOfGrid > 0) {
+      warnings.push(
+        `${channelDef.name}: ${droppedOutOfGrid} note${droppedOutOfGrid === 1 ? "" : "s"} past step ${appState.stepCount} dropped. ` +
+          `Extend the grid (8/16/32) or import a different section.`,
+      );
+    }
+
+    if (clippedAtBoundary > 0) {
+      warnings.push(`${channelDef.name}: ${clippedAtBoundary} note${clippedAtBoundary === 1 ? "" : "s"} clipped at the grid boundary.`);
+    }
+
+    return { warnings, notesWritten };
+  }
+
+  function insertImportedRun(channel, state, row, startStep, duration) {
+    let inserted = 0;
+
+    for (let i = 0; i < duration; i += 1) {
+      const step = startStep + i;
+      const key = `${row.id}:${step}`;
+
+      if (state.notes.has(key)) {
+        continue;
+      }
+
+      // Canale monofonico per step: pulisce note di altre righe sullo stesso step.
+      clearChannelStep(channel.id, step);
+
+      const entry = createEntryForCell(channel, row, step);
+      entry.isContinuation = i > 0;
+      state.notes.set(key, entry);
+      inserted += 1;
+    }
+
+    return inserted;
+  }
+
+  function pickRowForNote(channel, note) {
+    if (channel.kind === "noise" && channel.profile !== "TIA") {
+      return pickNesNoiseRow(channel, note.pitch);
+    }
+    return pickPitchedRow(channel, note.pitch);
+  }
+
+  function pickPitchedRow(channel, midiPitch) {
+    const rows = channel.rows;
+
+    if (!rows || rows.length === 0) {
+      return null;
+    }
+
+    const midis = rows.map(getRowMidi).filter((m) => m !== null);
+
+    if (midis.length === 0) {
+      return null;
+    }
+
+    const minMidi = Math.min(...midis);
+    const maxMidi = Math.max(...midis);
+
+    // Octave-shift per stare nel range del canale: una nota troppo alta/bassa
+    // viene trasposta di ottava finche' non rientra. Mantiene la classe di altezza
+    // (note name) anche se la voce reale e' diversa.
+    let target = midiPitch;
+
+    while (target > maxMidi) {
+      target -= 12;
+    }
+
+    while (target < minMidi) {
+      target += 12;
+    }
+
+    let best = null;
+    let bestDiff = Infinity;
+
+    for (const row of rows) {
+      const rowMidi = getRowMidi(row);
+
+      if (rowMidi === null) {
+        continue;
+      }
+
+      const diff = Math.abs(rowMidi - target);
+
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = row;
+      }
+    }
+
+    return best;
+  }
+
+  function pickNesNoiseRow(channel, pitch) {
+    // Mappatura kit MIDI -> period NES Noise (2-bin):
+    // pitch < 50 (kick / low tom / snare) -> period 14 (rumble basso)
+    // pitch >= 50 (hi-hat / cymbal / claves) -> period 4 (tono breve alto)
+    const targetIndex = pitch < 50 ? 14 : 4;
+    return channel.rows.find((r) => r.noiseIndex === targetIndex) || channel.rows[0] || null;
+  }
+
+  function getRowMidi(row) {
+    if (typeof row.midi === "number") {
+      return row.midi;
+    }
+
+    if (typeof row.label === "string") {
+      try {
+        return noteNameToMidi(row.label);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  function personalityToAudc(personality) {
+    switch (personality) {
+      case "Sharp square":
+        return 1;
+      case "Noise/Percussion":
+        return 8;
+      case "Soft square":
+      case "Standard square":
+      case "Smooth bass":
+      default:
+        return 12;
+    }
+  }
+
+  function hasExistingPianoRollNotes() {
+    for (const channelId of Object.keys(appState.channelState)) {
+      if (appState.channelState[channelId].notes.size > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function escapeHtml(value) {
+    const div = document.createElement("div");
+    div.textContent = String(value);
+    return div.innerHTML;
+  }
+
+  function readFileAsArrayBuffer(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+
+      reader.onload = () => {
+        if (reader.result instanceof ArrayBuffer) {
+          resolve(reader.result);
+          return;
+        }
+
+        reject(new Error("FileReader did not return an ArrayBuffer"));
+      };
+
+      reader.onerror = () => {
+        reject(reader.error ?? new Error("Cannot read MIDI file"));
+      };
+
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  function updateTransportState() {
+    playButton.disabled = isPlaying;
+    stopButton.disabled = !isPlaying;
+  }
+
+  function updateLoopButtonVisual() {
+    loopButton.classList.toggle("loop-active", appState.loop);
+    loopButton.setAttribute("aria-pressed", String(appState.loop));
+  }
+
+  async function handleGlobalKeydown(event) {
+    if (event.code !== "Space") {
+      return;
+    }
+
+    if (isTextInputLike(event.target)) {
+      return;
+    }
+
+    event.preventDefault();
+
+    if (isPlaying) {
+      stopPlayback();
+      return;
+    }
+
+    await startPlayback();
+  }
+
+  function isTextInputLike(target) {
+    if (!(target instanceof HTMLElement)) {
+      return false;
+    }
+
+    if (target.isContentEditable) {
+      return true;
+    }
+
+    return target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT";
+  }
+
+  function isFinitePositive(value) {
+    return Number.isFinite(value) && value > 0;
+  }
+
+  function getStepDurationSeconds() {
+    return 60 / appState.bpm / 4;
+  }
+
+  function handleBpmChange(event) {
+    const raw = Number(event.target.value);
+
+    if (!Number.isFinite(raw)) {
+      event.target.value = String(appState.bpm);
+      return;
+    }
+
+    const clamped = Math.max(BPM_MIN, Math.min(BPM_MAX, Math.round(raw)));
+
+    if (clamped === appState.bpm) {
+      event.target.value = String(clamped);
+      return;
+    }
+
+    appState.bpm = clamped;
+    event.target.value = String(clamped);
+    stopPlayback();
+  }
+
+  function handleStepCountChange(event) {
+    const value = Number(event.target.value);
+
+    if (!STEP_COUNT_OPTIONS.includes(value)) {
+      event.target.value = String(appState.stepCount);
+      return;
+    }
+
+    if (value === appState.stepCount) {
+      return;
+    }
+
+    stopPlayback();
+    appState.stepCount = value;
+    render();
+  }
+
+  function buildFamiTrackerText() {
+    const channels = NES_CHANNEL_DEFS;
+    const lines = [
+      `# TRACK 0 ${appState.bpm} 6 "Exported from ChipRoll"`,
+      "# COLUMNS : 1 1 1",
+      "# ORDER 0 : 0",
+      "# PATTERN 0",
+    ];
+
+    for (let step = 0; step < appState.stepCount; step += 1) {
+      const cells = channels.map((channel) => formatFamiTrackerCell(channel.id, getEntryForStep(channel.id, step)));
+      lines.push(`ROW ${String(step).padStart(2, "0")} : ${cells.join(" : ")}`);
+    }
+
+    return lines.join("\n");
+  }
+
+  function formatFamiTrackerCell(channelId, entry) {
+    if (!entry) {
+      return "... .. . ....";
+    }
+
+    const channel = NES_CHANNEL_DEFS.find((item) => item.id === channelId);
+
+    if (!channel) {
+      return "... .. . ....";
+    }
+
+    if (channel.kind === "noise") {
+      const note = formatNoiseToken(entry.noteName);
+      const registro = toUpperHex(entry.registro ?? 0, 2);
+      return `${note} ${registro} . ....`;
+    }
+
+    const note = formatFamiTrackerNote(entry.noteName);
+    const registro = toUpperHex(entry.nearest?.valore_registro ?? 0, 3);
+    return `${note} ${registro} . ....`;
+  }
+
+  function buildCa65Assembly() {
+    const lines = ["; Exported from ChipRoll"];
+
+    for (const channel of NES_CHANNEL_DEFS) {
+      lines.push(`${channel.id}_data:`);
+
+      for (const run of buildChannelRuns(channel.id)) {
+        lines.push(`  .byte ${run.symbol}, $${toUpperHex(run.duration, 2)}`);
+      }
+
+      lines.push("  .byte $00");
+      lines.push("");
+    }
+
+    return lines.join("\n").trimEnd();
+  }
+
+  function buildChannelRuns(channelId) {
+    const runs = [];
+    let currentSymbol = null;
+    let currentDuration = 0;
+
+    for (let step = 0; step < appState.stepCount; step += 1) {
+      const entry = getEntryForStep(channelId, step);
+      const symbol = entry ? toAssemblySymbol(channelId, entry.noteName) : "NOTE_REST";
+      // Una nota con isContinuation=true estende il run precedente.
+      // Le pause (NOTE_REST) consecutive si fondono sempre.
+      // Una nota click-inserita (isContinuation=false) inizia sempre un nuovo run,
+      // anche se ha lo stesso simbolo della precedente.
+      const canExtendRun =
+        symbol === currentSymbol &&
+        (symbol === "NOTE_REST" || (entry && entry.isContinuation === true));
+
+      if (canExtendRun) {
+        currentDuration += 1;
+        continue;
+      }
+
+      if (currentSymbol !== null) {
+        runs.push({ symbol: currentSymbol, duration: currentDuration });
+      }
+
+      currentSymbol = symbol;
+      currentDuration = 1;
+    }
+
+    if (currentSymbol !== null) {
+      runs.push({ symbol: currentSymbol, duration: currentDuration });
+    }
+
+    return runs;
+  }
+
+  function buildGenericSessionJson() {
+    const channels = getCurrentChannels();
+    const snapshot = {
+      active_chip: appState.activeChip,
+      bpm: appState.bpm,
+      step_count: appState.stepCount,
+      channels: channels.map((channel) => ({
+        id: channel.id,
+        name: channel.name,
+        kind: channel.kind,
+        timbre: channel.profile === "TIA" ? channel.timbreLabel : null,
+        audc: channel.profile === "TIA" ? channel.audc : null,
+        muted: appState.channelState[channel.id].muted,
+        solo: appState.channelState[channel.id].solo,
+        steps: Array.from({ length: appState.stepCount }, (_, step) => {
+          const entry = getEntryForStep(channel.id, step);
+
+          if (!entry) {
+            return {
+              step,
+              note: null,
+              real_hz: null,
+              register: null,
+              cents_offset: null,
+            };
+          }
+
+          return {
+            step,
+            note: entry.noteName,
+            real_hz: entry.hz ?? null,
+            register: resolveEntryRegister(channel, entry),
+            cents_offset: entry.nearest?.scarto_cents ?? null,
+          };
+        }),
+      })),
+    };
+
+    return JSON.stringify(snapshot, null, 2);
+  }
+
+  function resolveEntryRegister(channel, entry) {
+    return entry.registro ?? entry.nearest?.valore_registro ?? null;
+  }
+
+  function formatFamiTrackerNote(noteName) {
+    const match = /^([A-G])(#?)(-?\d+)$/.exec(noteName);
+
+    if (!match) {
+      return "...";
+    }
+
+    const [, pitch, sharp, octave] = match;
+    return `${pitch}${sharp ? "#" : "-"}${octave}`;
+  }
+
+  function formatNoiseToken(noteName) {
+    const match = /(\d+)$/.exec(noteName);
+    const indexText = match ? match[1] : "0";
+    return `N-${indexText.slice(-1)}`;
+  }
+
+  function toAssemblySymbol(channelId, noteName) {
+    if (channelId === "noise") {
+      return `NOISE_${noteName.replace(/\s+/g, "_").toUpperCase()}`;
+    }
+
+    return `NOTE_${noteName.replace("#", "S").toUpperCase()}`;
+  }
+
+  function toUpperHex(value, width) {
+    return Number(value).toString(16).toUpperCase().padStart(width, "0");
+  }
+
+  function formatCents(cents) {
+    const sign = cents >= 0 ? "+" : "";
+    return `${sign}${cents.toFixed(1)}¢`;
+  }
+
+  function getIntonationClassName(cents) {
+    const absoluteCents = Math.abs(cents);
+
+    if (absoluteCents < 10) {
+      return "intonation-good";
+    }
+
+    if (absoluteCents <= 25) {
+      return "intonation-warn";
+    }
+
+    return "intonation-bad";
+  }
+
+  function buildNoteRange(startNote, endNote) {
+    const startMidi = noteNameToMidi(startNote);
+    const endMidi = noteNameToMidi(endNote);
+    const range = [];
+
+    for (let midi = endMidi; midi >= startMidi; midi -= 1) {
+      const label = midiToNoteName(midi);
+      range.push({
+        id: label,
+        label,
+        midi,
+        hz: midiToHz(midi),
+        isBlackKey: label.includes("#"),
+      });
+    }
+
+    return range;
+  }
+
+  function buildNoiseRows() {
+    const rows = [];
+
+    for (let index = 15; index >= 0; index -= 1) {
+      rows.push({
+        id: `noise-${index}`,
+        label: `Period ${index}`,
+        hz: 40 + index,
+        noiseIndex: index,
+        isBlackKey: false,
+      });
+    }
+
+    return rows;
+  }
+
+  function buildTiaRows(audc) {
+    const table = getTiaFrequencyTable(audc);
+
+    return [...table.entries]
+      .sort((left, right) => right.hz - left.hz)
+      .map((entry) => {
+        const concert = createConcertPitchMatch(entry.hz);
+        return {
+          id: `tia-${audc}-${entry.audf}`,
+          label: concert.noteName,
+          targetHz: concert.concertHz,
+          outputHz: entry.hz,
+          audf: entry.audf,
+          isBlackKey: concert.noteName.includes("#"),
+          cents: concert.scarto_cents,
+        };
+      });
+  }
+
+  function createConcertPitchMatch(hz) {
+    const midi = hzToNearestMidi(hz);
+    const noteName = midiToNoteName(midi);
+    const concertHz = midiToHz(midi);
+    const cents = 1200 * Math.log2(hz / concertHz);
+
+    return {
+      noteName,
+      concertHz,
+      scarto_cents: cents,
+      intonato: Math.abs(cents) < 10,
+      hz_piu_vicino: hz,
+    };
+  }
+
+  function createRowIntonation(outputHz, targetHz) {
+    const cents = 1200 * Math.log2(outputHz / targetHz);
+
+    return {
+      hz_piu_vicino: outputHz,
+      scarto_cents: cents,
+      intonato: Math.abs(cents) < 10,
+    };
+  }
+
+  function hzToNearestMidi(hz) {
+    return Math.round(69 + 12 * Math.log2(hz / 440));
+  }
+
+  function noteNameToMidi(noteName) {
+    const match = /^([A-G])(#?)(-?\d+)$/.exec(noteName);
+
+    if (!match) {
+      throw new Error(`Nome nota non valido: ${noteName}`);
+    }
+
+    const [, pitch, sharp, octaveText] = match;
+    const pitchClassMap = {
+      C: 0,
+      D: 2,
+      E: 4,
+      F: 5,
+      G: 7,
+      A: 9,
+      B: 11,
+    };
+    const pitchClass = pitchClassMap[pitch] + (sharp ? 1 : 0);
+    const octave = Number(octaveText);
+    return (octave + 1) * 12 + pitchClass;
+  }
+
+  function midiToNoteName(midi) {
+    const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    const pitchClass = ((midi % 12) + 12) % 12;
+    const octave = Math.floor(midi / 12) - 1;
+    return `${noteNames[pitchClass]}${octave}`;
+  }
+
+  function midiToHz(midi) {
+    return 440 * (2 ** ((midi - 69) / 12));
+  }
+})();
