@@ -36,7 +36,9 @@
   const importConfirm = document.getElementById("import-confirm");
   const {
     TIA_TIMBRE_OPTIONS,
+    POKEY_TIMBRE_OPTIONS,
     getNearestNote,
+    getNearestPokeyNote,
     getTiaFrequencyTable,
   } = window.FrequencyEngine;
   const { parseMidi } = window.MidiParser;
@@ -54,6 +56,12 @@
   const TIA_CHANNEL_LABELS = {
     tia1: "TIA Ch.1",
     tia2: "TIA Ch.2",
+  };
+  const POKEY_CHANNEL_LABELS = {
+    pokey1: "POKEY Ch.1",
+    pokey2: "POKEY Ch.2",
+    pokey3: "POKEY Ch.3",
+    pokey4: "POKEY Ch.4",
   };
   const STEP_COUNT_OPTIONS = [8, 16, 32];
   const BPM_MIN = 40;
@@ -75,6 +83,13 @@
         "Two TIA channels with per-lane selectable timbre. Each timbre shows only the pitches physically available on the chip.",
       heroChip: "Atari TIA",
       panelTitle: "TIA Ch.1 / TIA Ch.2",
+    },
+    POKEY: {
+      heroTitle: "ChipRoll - Atari POKEY",
+      heroCopy:
+        "Four POKEY channels across 5 octaves (B2-B7). Each channel has a per-pattern timbre (Pure tone / Buzz / Noise) — to switch timbre on the same channel mid-song, use a separate pattern.",
+      heroChip: "Atari POKEY",
+      panelTitle: "POKEY Ch.1 / Ch.2 / Ch.3 / Ch.4",
     },
   };
   const NES_CHANNEL_DEFS = [
@@ -130,6 +145,15 @@
   const TIA_CHANNEL_DEFS = [
     { id: "tia1", name: "TIA Ch.1", profile: "TIA" },
     { id: "tia2", name: "TIA Ch.2", profile: "TIA" },
+  ];
+  // POKEY: 4 canali con stesso range musicale (clock fisso 64 kHz su tutti).
+  // rows e' pre-calcolato qui (note continue, NES-style) — il timbre cambia
+  // solo come l'audio synth e il chip interpretano AUDC, non i pitch.
+  const POKEY_CHANNEL_DEFS = [
+    { id: "pokey1", name: "POKEY Ch.1", profile: "POKEY", rows: buildNoteRange("C2", "C7") },
+    { id: "pokey2", name: "POKEY Ch.2", profile: "POKEY", rows: buildNoteRange("C2", "C7") },
+    { id: "pokey3", name: "POKEY Ch.3", profile: "POKEY", rows: buildNoteRange("C2", "C7") },
+    { id: "pokey4", name: "POKEY Ch.4", profile: "POKEY", rows: buildNoteRange("C2", "C7") },
   ];
   // Pattern-aware state (Step 1 del refactor patterns/song).
   // - patterns: dict { [id]: Pattern }, dove Pattern = { id, label, stepCount, channels: { [id]: { notes: Map, audc? } } }
@@ -806,7 +830,7 @@
     laneEyebrow.textContent = channel.kind === "noise" ? "Percussion" : "Pitched";
 
     const laneName = document.createElement("h3");
-    laneName.textContent = channel.profile === "TIA"
+    laneName.textContent = (channel.profile === "TIA" || channel.profile === "POKEY")
       ? `${channel.name} - ${channel.timbreLabel}`
       : channel.name;
 
@@ -828,8 +852,8 @@
 
     laneControls.appendChild(collapseButton);
 
-    if (channel.profile === "TIA") {
-      laneControls.appendChild(renderTiaTimbreSelect(channel, data));
+    if (channel.profile === "TIA" || channel.profile === "POKEY") {
+      laneControls.appendChild(renderTimbreSelect(channel, data));
     }
 
     const muteButton = document.createElement("button");
@@ -916,6 +940,12 @@
           await copyExportText("tia-ca65", buildTiaCa65Assembly());
         }),
       );
+    } else if (appState.activeChip === "POKEY") {
+      buttons.appendChild(
+        renderExportButton("POKEY-native ca65", "pokey-ca65", async () => {
+          await copyExportText("pokey-ca65", buildPokeyCa65Assembly());
+        }),
+      );
     }
 
     buttons.appendChild(
@@ -939,7 +969,11 @@
     return button;
   }
 
-  function renderTiaTimbreSelect(channel, data) {
+  function renderTimbreSelect(channel, data) {
+    const isPokey = channel.profile === "POKEY";
+    const options = isPokey ? POKEY_TIMBRE_OPTIONS : TIA_TIMBRE_OPTIONS;
+    const onChange = isPokey ? changePokeyTimbre : changeTiaTimbre;
+
     const wrapper = document.createElement("label");
     wrapper.className = "timbre-select-wrap";
 
@@ -951,10 +985,10 @@
     select.className = "timbre-select";
     select.setAttribute("data-channel-id", channel.id);
     select.addEventListener("change", (event) => {
-      changeTiaTimbre(channel.id, Number(event.target.value));
+      onChange(channel.id, Number(event.target.value));
     });
 
-    for (const option of TIA_TIMBRE_OPTIONS) {
+    for (const option of options) {
       const optionElement = document.createElement("option");
       optionElement.value = String(option.audc);
       optionElement.textContent = option.label;
@@ -1118,6 +1152,11 @@
       if (channel.supportsIntonation) {
         entry.nearest = createRowIntonation(row.outputHz, row.targetHz);
       }
+    } else if (channel.profile === "POKEY") {
+      entry.hz = row.hz;
+      entry.targetHz = row.hz;
+      entry.nearest = getNearestPokeyNote(row.hz, channel.audc);
+      entry.registro = entry.nearest.valore_registro;
     } else if (channel.kind === "noise") {
       entry.hz = row.hz;
       entry.registro = row.noiseIndex ?? 0;
@@ -1883,9 +1922,11 @@
         1: buildTiaRows(1),
         8: buildTiaRows(8),
       };
+    } else {
+      appState.tiaRowsByAudc = {};
     }
 
-    const channelDefs = chip === "NES" ? NES_CHANNEL_DEFS : TIA_CHANNEL_DEFS;
+    const channelDefs = channelDefsForChip(chip);
 
     appState.channelGlobals = Object.fromEntries(
       channelDefs.map((channel) => [
@@ -1906,8 +1947,28 @@
     updateTransportModeVisual();
   }
 
+  function channelDefsForChip(chip) {
+    switch (chip) {
+      case "NES":
+        return NES_CHANNEL_DEFS;
+      case "TIA":
+        return TIA_CHANNEL_DEFS;
+      case "POKEY":
+        return POKEY_CHANNEL_DEFS;
+      default:
+        throw new Error(`Chip non supportato: ${chip}`);
+    }
+  }
+
+  function defaultAudcForChip(chip) {
+    if (chip === "TIA") return 12;
+    if (chip === "POKEY") return 0xA0;
+    return null;
+  }
+
   function createEmptyPattern(id, chip, stepCount) {
-    const channelDefs = chip === "NES" ? NES_CHANNEL_DEFS : TIA_CHANNEL_DEFS;
+    const channelDefs = channelDefsForChip(chip);
+    const defaultAudc = defaultAudcForChip(chip);
     return {
       id,
       label: null,
@@ -1915,8 +1976,8 @@
       channels: Object.fromEntries(
         channelDefs.map((channel) => [
           channel.id,
-          chip === "TIA"
-            ? { notes: new Map(), audc: 12 }
+          defaultAudc !== null
+            ? { notes: new Map(), audc: defaultAudc }
             : { notes: new Map() },
         ]),
       ),
@@ -1930,6 +1991,29 @@
   function getChannelsForPattern(patternId) {
     if (appState.activeChip === "NES") {
       return NES_CHANNEL_DEFS;
+    }
+
+    if (appState.activeChip === "POKEY") {
+      return POKEY_CHANNEL_DEFS.map((channel) => {
+        const data = channelData(channel.id, patternId);
+        const audc = data.audc;
+        const timbre = POKEY_TIMBRE_OPTIONS.find((option) => option.audc === audc);
+
+        return {
+          ...channel,
+          chip: "POKEY",
+          audc,
+          timbreLabel: timbre.label,
+          // POKEY noise e' comunque pitched (LFSR rate via AUDF), quindi
+          // tutti i timbres restano "pitched" nel modello dati. L'audio
+          // synth distingue square vs noise dal waveform.
+          kind: "pitched",
+          waveform: audc === 0x80 ? "noise" : "square",
+          laneClass: getPokeyLaneClass(audc),
+          rowLabel: "Note / Step",
+          supportsIntonation: true,
+        };
+      });
     }
 
     return TIA_CHANNEL_DEFS.map((channel) => {
@@ -1965,6 +2049,19 @@
     }
   }
 
+  function getPokeyLaneClass(audc) {
+    switch (audc) {
+      case 0xA0:
+        return "pokey-tone";
+      case 0xE0:
+        return "pokey-buzz";
+      case 0x80:
+        return "pokey-noise";
+      default:
+        return "pokey-tone";
+    }
+  }
+
   function changeTiaTimbre(channelId, audc) {
     // AUDC e' per-pattern (decisione Y del design): cambiare timbro su Ch.1
     // tocca solo il pattern in edit. Le note esistenti del pattern corrente
@@ -1973,6 +2070,23 @@
     const data = channelData(channelId);
 
     if (!data || !appState.tiaRowsByAudc[audc]) {
+      return;
+    }
+
+    data.audc = audc;
+    data.notes.clear();
+    render();
+  }
+
+  function changePokeyTimbre(channelId, audc) {
+    // POKEY: AUDC per-pattern come TIA. Le righe POKEY sono note musicali
+    // shared tra timbres, quindi la audf-mapping cambia (getNearestPokeyNote)
+    // ma le rows no. Per coerenza con TIA cancello comunque le note del
+    // pattern: cambiare timbre = cambiare "strumento", l'utente si aspetta
+    // di ricominciare la melodia.
+    const data = channelData(channelId);
+
+    if (!data || !POKEY_TIMBRE_OPTIONS.some((option) => option.audc === audc)) {
       return;
     }
 
@@ -3010,19 +3124,47 @@
 
   function buildFamiTrackerText() {
     const channels = NES_CHANNEL_DEFS;
-    const lines = [
-      `# TRACK 0 ${appState.bpm} 6 "Exported from ChipRoll"`,
-      "# COLUMNS : 1 1 1 1",
-      "# ORDER 0 : 0",
-      "# PATTERN 0",
-    ];
-
-    for (let step = 0; step < currentStepCount(); step += 1) {
-      const cells = channels.map((channel) => formatFamiTrackerCell(channel.id, getEntryForStep(channel.id, step)));
-      lines.push(`ROW ${String(step).padStart(2, "0")} : ${cells.join(" : ")}`);
+    const orderedPatternIds = appState.patternOrder.slice();
+    if (orderedPatternIds.length === 0) {
+      return "; No patterns to export";
     }
 
-    return lines.join("\n");
+    // FamiTracker text impone una pattern_length globale per il track. ChipRoll
+    // consente stepCount per-pattern: paddiamo i pattern brevi con righe vuote
+    // fino a max(stepCount). I pattern brevi avranno trailing rests visibili.
+    const stepCounts = orderedPatternIds.map((pid) => appState.patterns[pid].stepCount);
+    const maxStep = Math.max(...stepCounts);
+    const hasMixedStepCounts = stepCounts.some((s) => s !== maxStep);
+
+    const lines = [];
+    if (hasMixedStepCounts) {
+      lines.push(
+        `# NOTE: patterns have mixed step counts (${stepCounts.join(", ")}); shorter patterns are padded to ${maxStep} rows with empty cells.`,
+      );
+    }
+    lines.push(`# TRACK ${maxStep} ${appState.bpm} 6 "Exported from ChipRoll"`);
+    lines.push("# COLUMNS : 1 1 1 1");
+
+    const orderSource = appState.song.length === 0 ? orderedPatternIds : appState.song;
+    const orderIndices = orderSource
+      .map((pid) => orderedPatternIds.indexOf(pid))
+      .filter((i) => i >= 0);
+    const orderHex = orderIndices.map((i) => toUpperHex(i, 2)).join(" ");
+    lines.push(`# ORDER 0 : ${orderHex}`);
+
+    orderedPatternIds.forEach((pid, patternIdx) => {
+      const pattern = appState.patterns[pid];
+      lines.push(`# PATTERN ${toUpperHex(patternIdx, 2)}${pattern.label ? ` ; ${pattern.label}` : ""}`);
+      for (let step = 0; step < maxStep; step += 1) {
+        const cells = step < pattern.stepCount
+          ? channels.map((channel) => formatFamiTrackerCell(channel.id, getEntryForStep(channel.id, step, pid)))
+          : channels.map(() => "... .. . ....");
+        lines.push(`ROW ${toUpperHex(step, 2)} : ${cells.join(" : ")}`);
+      }
+      lines.push("");
+    });
+
+    return lines.join("\n").trimEnd();
   }
 
   function formatFamiTrackerCell(channelId, entry) {
@@ -3048,29 +3190,76 @@
   }
 
   function buildCa65Assembly() {
-    const lines = ["; Exported from ChipRoll"];
+    // Layout: per ogni pattern, 4 stream RLE (pulse1/pulse2/triangle/noise)
+    // ognuno terminato da $00, piu' un descriptor con 4 .word puntatori.
+    // Pattern boundary = implicit note-off (lo stream termina, non sustaina
+    // cross-pattern). Le tabelle song mappano descriptor + step count e
+    // l'ordine di playback (chiuso da $FF).
+    const lines = [
+      "; Exported from ChipRoll - NES ca65 (song-aware)",
+      `; BPM: ${appState.bpm}`,
+      "; Per-channel RLE: pairs of (NOTE_SYMBOL, duration), $00 terminator.",
+      "; Each pattern has 4 streams (pulse1, pulse2, triangle, noise) and a",
+      "; descriptor of 4 .word entries. song_pattern_table indexes descriptors,",
+      "; song_order ends with $FF.",
+      "",
+    ];
 
-    for (const channel of NES_CHANNEL_DEFS) {
-      lines.push(`${channel.id}_data:`);
-
-      for (const run of buildChannelRuns(channel.id)) {
-        lines.push(`  .byte ${run.symbol}, $${toUpperHex(run.duration, 2)}`);
+    for (const patternId of appState.patternOrder) {
+      const pattern = appState.patterns[patternId];
+      if (!pattern) {
+        continue;
       }
 
-      lines.push("  .byte $00");
+      lines.push(`PATTERN_${patternId}_STEPS = ${pattern.stepCount}`);
+      for (const channel of NES_CHANNEL_DEFS) {
+        lines.push(`pattern_${patternId}_${channel.id}_data:`);
+        for (const run of buildChannelRuns(channel.id, patternId, pattern.stepCount)) {
+          lines.push(`  .byte ${run.symbol}, $${toUpperHex(run.duration, 2)}`);
+        }
+        lines.push("  .byte $00");
+      }
+
+      lines.push(`pattern_${patternId}_descriptor:`);
+      for (const channel of NES_CHANNEL_DEFS) {
+        lines.push(`  .word pattern_${patternId}_${channel.id}_data`);
+      }
       lines.push("");
     }
 
-    return lines.join("\n").trimEnd();
+    lines.push("; Song tables");
+    lines.push("song_pattern_table:");
+    for (const patternId of appState.patternOrder) {
+      lines.push(`  .word pattern_${patternId}_descriptor`);
+    }
+
+    lines.push("song_length_table:");
+    for (const patternId of appState.patternOrder) {
+      lines.push(`  .byte PATTERN_${patternId}_STEPS`);
+    }
+
+    lines.push("song_order:");
+    if (appState.song.length === 0) {
+      lines.push("  .byte $FF   ; empty song");
+      lines.push("song_order_length = 0");
+    } else {
+      const indices = appState.song.map((sid) => appState.patternOrder.indexOf(sid));
+      const hex = indices.map((i) => `$${toUpperHex(i, 2)}`).join(", ");
+      lines.push(`  .byte ${hex}`);
+      lines.push("  .byte $FF   ; end marker");
+      lines.push(`song_order_length = ${appState.song.length}`);
+    }
+
+    return lines.join("\n");
   }
 
-  function buildChannelRuns(channelId) {
+  function buildChannelRuns(channelId, patternId = appState.currentPatternId, stepCount = currentStepCount()) {
     const runs = [];
     let currentSymbol = null;
     let currentDuration = 0;
 
-    for (let step = 0; step < currentStepCount(); step += 1) {
-      const entry = getEntryForStep(channelId, step);
+    for (let step = 0; step < stepCount; step += 1) {
+      const entry = getEntryForStep(channelId, step, patternId);
       const symbol = entry ? toAssemblySymbol(channelId, entry.noteName) : "NOTE_REST";
       // Una nota con isContinuation=true estende il run precedente.
       // Le pause (NOTE_REST) consecutive si fondono sempre.
@@ -3170,6 +3359,80 @@
     return lines.join("\n");
   }
 
+  function buildPokeyCa65Assembly() {
+    // Layout: per ogni pattern una label `pokey_pattern_PN:` con uno stream
+    // di 8 byte per step (4 canali x AUDF,AUDC). AUDC byte = high nibble
+    // (distortion: $A0/$E0/$80) OR'd con low nibble (volume 0-15). Sui rest
+    // AUDF=AUDC=$00 (volume 0 = silenzio garantito sul chip reale: POKEY
+    // non auto-mute senza una scrittura esplicita di volume 0).
+    // AUDCTL = $00 setup-time: nessun joined 16-bit, nessun filtro, clock
+    // 64 kHz su tutti i canali. Player tipico: scrive AUDCTL=$00 a $D208
+    // una volta init, poi stream pattern data a $D200..$D207 ogni frame.
+    const VOLUME_FULL = 0x0F;
+    const lines = [
+      "; Exported from ChipRoll - POKEY-native ca65 (song-aware)",
+      `; BPM: ${appState.bpm}`,
+      "; AUDCTL = $00 (64 kHz clock, no joined, no filters). Set once at init.",
+      "; Format per step: 4 channels x (AUDF, AUDC) = 8 bytes.",
+      "; AUDC byte: high nibble = distortion ($A=pure $E=buzz $8=noise),",
+      "; low nibble = volume (0-15, $F = full). AUDC=$00 = silent step.",
+      "",
+    ];
+
+    for (const patternId of appState.patternOrder) {
+      const pattern = appState.patterns[patternId];
+      if (!pattern) {
+        continue;
+      }
+
+      lines.push(`PATTERN_${patternId}_STEPS = ${pattern.stepCount}`);
+      lines.push(`pokey_pattern_${patternId}:`);
+
+      for (let step = 0; step < pattern.stepCount; step += 1) {
+        const bytes = [];
+        for (const channel of POKEY_CHANNEL_DEFS) {
+          const entry = getEntryForStep(channel.id, step, patternId);
+          if (entry) {
+            const audf = entry.registro ?? 0;
+            const audc = ((entry.audc ?? 0) | VOLUME_FULL) & 0xFF;
+            bytes.push(audf, audc);
+          } else {
+            bytes.push(0, 0);
+          }
+        }
+        const hex = bytes.map((b) => `$${toUpperHex(b, 2)}`).join(", ");
+        lines.push(`  .byte ${hex}   ; step ${step}`);
+      }
+
+      lines.push("");
+    }
+
+    lines.push("; Song tables");
+    lines.push("pokey_song_pattern_table:");
+    for (const patternId of appState.patternOrder) {
+      lines.push(`  .word pokey_pattern_${patternId}`);
+    }
+
+    lines.push("pokey_song_length_table:");
+    for (const patternId of appState.patternOrder) {
+      lines.push(`  .byte PATTERN_${patternId}_STEPS`);
+    }
+
+    lines.push("pokey_song_order:");
+    if (appState.song.length === 0) {
+      lines.push("  .byte $FF   ; empty song");
+      lines.push("pokey_song_order_length = 0");
+    } else {
+      const indices = appState.song.map((sid) => appState.patternOrder.indexOf(sid));
+      const hex = indices.map((i) => `$${toUpperHex(i, 2)}`).join(", ");
+      lines.push(`  .byte ${hex}`);
+      lines.push("  .byte $FF   ; end marker");
+      lines.push(`pokey_song_order_length = ${appState.song.length}`);
+    }
+
+    return lines.join("\n");
+  }
+
   function buildGenericSessionJson() {
     const channels = getCurrentChannels();
     const snapshot = {
@@ -3180,8 +3443,8 @@
         id: channel.id,
         name: channel.name,
         kind: channel.kind,
-        timbre: channel.profile === "TIA" ? channel.timbreLabel : null,
-        audc: channel.profile === "TIA" ? channel.audc : null,
+        timbre: (channel.profile === "TIA" || channel.profile === "POKEY") ? channel.timbreLabel : null,
+        audc: (channel.profile === "TIA" || channel.profile === "POKEY") ? channel.audc : null,
         muted: channelMixer(channel.id).muted,
         solo: channelMixer(channel.id).solo,
         steps: Array.from({ length: currentStepCount() }, (_, step) => {

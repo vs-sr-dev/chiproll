@@ -1,6 +1,6 @@
 # ChipRoll
 
-A browser-based piano roll for chip music composition. NES (4 channels) and Atari TIA (2 channels). No install, no build, no server.
+A browser-based piano roll for chip music composition. NES (4 channels), Atari TIA (2 channels), and Atari POKEY (4 channels). No install, no build, no server.
 
 > Open `index.html` and start composing.
 
@@ -15,7 +15,7 @@ It's not trying to replace anything. It's trying to be the path of least resista
 ## What works today
 
 ### Composition
-- Two chips: **NES APU** (Pulse 1, Pulse 2, Triangle, Noise) and **Atari TIA** (Ch.1, Ch.2 with Pure Tone / Buzz / Noise timbres).
+- Three chips: **NES APU** (Pulse 1, Pulse 2, Triangle, Noise), **Atari TIA** (Ch.1, Ch.2 with Pure Tone / Buzz / Noise timbres), and **Atari POKEY** (4 channels, each with per-pattern Pure Tone / Buzz / Noise timbre, ~B2–B7 across all timbres). POKEY v1 keeps AUDCTL at `$00` — single 64 kHz clock, no joined 16-bit channels, no filters — to keep the player code small. 16-bit joined channels and the 15 kHz / 1.79 MHz clock modes are deferred to a follow-up.
 - Grid: **8 / 16 / 32 steps** per pattern, BPM 40–300, Loop transport.
 - Frequency engine with chip-accurate register values and per-note intonation feedback in cents (green / yellow / red).
 - Mute / Solo per channel, collapse lanes for focus.
@@ -45,9 +45,12 @@ It's not trying to replace anything. It's trying to be the path of least resista
 - BPM and PPQ from the MIDI carry over.
 
 ### Export
-- **FamiTracker text** (NES) — paste-ready ROW format.
-- **ca65 assembly** (NES) — run-length-encoded with named note constants. Long sustained notes collapse into single entries.
-- **TIA-native ca65** (TIA) — song-aware: one `pattern_PN:` label per pattern with `(AUDF, AUDC, AUDV)` triplets per step per channel, plus `song_pattern_table` / `song_length_table` / `song_order` so a player can iterate the song chain.
+All NES and TIA exports are **song-aware**: they emit every pattern in the rack plus song tables that describe the playback order. JSON is a full session snapshot.
+
+- **FamiTracker text** (NES) — one `# PATTERN NN` block per pattern plus an `# ORDER` list. Because FamiTracker text imposes a single global pattern length per track, patterns with shorter step counts are padded with trailing empty rows up to the longest one; a `# NOTE` comment flags this when patterns are heterogeneous.
+- **ca65 assembly** (NES) — per-pattern run-length-encoded streams (one per channel: pulse1, pulse2, triangle, noise), each terminated by `$00`, plus a `pattern_PN_descriptor` of four `.word` pointers. `song_pattern_table` / `song_length_table` / `song_order` (closed by `$FF`) let a player iterate the chain.
+- **TIA-native ca65** (TIA) — one `pattern_PN:` label per pattern with `(AUDF, AUDC, AUDV)` triplets per step per channel, plus `song_pattern_table` / `song_length_table` / `song_order`.
+- **POKEY-native ca65** (POKEY) — one `pokey_pattern_PN:` label per pattern with `(AUDF, AUDC)` pairs per step per channel (4 channels × 2 bytes = 8 bytes per step). AUDC byte already has the distortion (`$A0`/`$E0`/`$80`) OR'd with volume `$0F`; rests emit `$00,$00` for explicit silence. Tables are `pokey_song_pattern_table` / `pokey_song_length_table` / `pokey_song_order`.
 - **Generic JSON** — full session snapshot, including actual chip frequencies and cents offsets for every step.
 
 ### Session
@@ -66,10 +69,11 @@ It's not trying to replace anything. It's trying to be the path of least resista
 - **ca65 note-constants header** — separate `.inc` file with all the note symbols used by the NES assembly export.
 
 ### Chip expansion
-- **Atari POKEY** — opens up serious composition for the 7800 (POKEY cart) and Atari 8-bit machines. Scoped as a dedicated session.
+- **POKEY v2** — joined 16-bit channels (`AUDCTL` bits 3/4) and alternative clocks (15 kHz for bass, 1.79 MHz for CH1/CH3 ultra-high pitch). Unlocks proper bass below B2 and pitch precision at the top of the range.
 - **MusicXML import** — alternative to MIDI for those working from notation; already specified in the original brief (Step 8).
 
 ### Nice to have
+- **Transpose Oct+ / Oct−** per channel (later: per semitone), beside Mute / Solo, with a warning when notes would fall outside the channel's range and get clipped.
 - Undo / redo.
 - MIDI export — round-trip back to DAWs for anyone who'd rather finish a sketch outside ChipRoll.
 

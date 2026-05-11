@@ -767,6 +767,18 @@ body {
   box-shadow: inset 0 0 0 1px rgba(84, 76, 119, 0.1);
 }
 
+.lane-pokey-tone {
+  box-shadow: inset 0 0 0 1px rgba(59, 107, 217, 0.1);
+}
+
+.lane-pokey-buzz {
+  box-shadow: inset 0 0 0 1px rgba(46, 145, 130, 0.1);
+}
+
+.lane-pokey-noise {
+  box-shadow: inset 0 0 0 1px rgba(89, 68, 154, 0.1);
+}
+
 .channel-header {
   display: flex;
   justify-content: space-between;
@@ -987,6 +999,24 @@ body {
     #e8e3f4;
 }
 
+.grid-cell.pokey-tone.occupied {
+  background:
+    linear-gradient(135deg, rgba(59, 107, 217, 0.14), transparent 70%),
+    #dee9ff;
+}
+
+.grid-cell.pokey-buzz.occupied {
+  background:
+    linear-gradient(135deg, rgba(46, 145, 130, 0.16), transparent 70%),
+    #d6f1e9;
+}
+
+.grid-cell.pokey-noise.occupied {
+  background:
+    linear-gradient(135deg, rgba(89, 68, 154, 0.14), transparent 70%),
+    #e4ddf3;
+}
+
 .grid-cell.playing {
   background:
     linear-gradient(135deg, rgba(69, 131, 92, 0.18), transparent 72%),
@@ -1058,6 +1088,24 @@ body {
   border-color: rgba(84, 76, 119, 0.35);
   background: linear-gradient(180deg, #8b84ad 0%, #544c77 100%);
   color: #f7f4ff;
+}
+
+.note-pill.channel-pokey-tone {
+  border-color: rgba(59, 107, 217, 0.35);
+  background: linear-gradient(180deg, #6a93ed 0%, #2c54b8 100%);
+  color: #fbfdff;
+}
+
+.note-pill.channel-pokey-buzz {
+  border-color: rgba(46, 145, 130, 0.35);
+  background: linear-gradient(180deg, #5fbfa9 0%, #2e9182 100%);
+  color: #fcfffe;
+}
+
+.note-pill.channel-pokey-noise {
+  border-color: rgba(89, 68, 154, 0.35);
+  background: linear-gradient(180deg, #9a87c8 0%, #59449a 100%);
+  color: #faf6ff;
 }
 
 .note-pill-title {

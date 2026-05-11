@@ -6,6 +6,10 @@ const {
   NES_TRIANGLE_FREQUENCY_TABLE,
   TIA_FREQUENCY_TABLES,
   getTiaFrequencyTable,
+  POKEY_FREQUENCY_TABLES,
+  POKEY_TIMBRE_OPTIONS,
+  getPokeyFrequencyTable,
+  getNearestPokeyNote,
 } = require("./frequencyEngine");
 
 const pulseResult = getNearestNote(440);
@@ -34,6 +38,25 @@ assert.equal(tiaPureTable.entries[0].audf, 0);
 assert.ok(Math.abs(tiaPureTable.entries[0].hz - 31113.105263157893) < 1e-9);
 assert.equal(tiaBuzzTable.entries[0].hz, 2080);
 assert.equal(tiaBuzzTable.entries[31].hz, 65);
+
+// POKEY: 3 timbres, clock fisso 64 kHz, AUDF 0-255 (256 entries).
+const pokeyPureTable = getPokeyFrequencyTable(0xA0);
+const pokeyBuzzTable = getPokeyFrequencyTable(0xE0);
+const pokeyNoiseTable = getPokeyFrequencyTable(0x80);
+assert.equal(POKEY_TIMBRE_OPTIONS.length, 3);
+assert.equal(POKEY_FREQUENCY_TABLES[0xA0].entries.length, 256);
+assert.equal(pokeyPureTable.entries[0].audf, 0);
+assert.equal(pokeyPureTable.entries[0].hz, 32000); // f = 64000 / (2 * (0+1))
+assert.equal(pokeyPureTable.entries[255].hz, 64000 / (2 * 256));
+// Tutti e 3 i timbres condividono la stessa formula clock (differiscono nel
+// synth audio e nell'AUDC scritto al chip, non nella frequenza).
+assert.equal(pokeyPureTable.entries[100].hz, pokeyBuzzTable.entries[100].hz);
+assert.equal(pokeyPureTable.entries[100].hz, pokeyNoiseTable.entries[100].hz);
+
+// A4 (440 Hz) → AUDF nearest = round(64000 / (2 * 440)) - 1 = 72
+const pokeyA4 = getNearestPokeyNote(440, 0xA0);
+assert.equal(pokeyA4.valore_registro, 72);
+assert.ok(Math.abs(pokeyA4.scarto_cents) < 15);
 
 console.log("A4 (440 Hz) test passed:");
 console.log(pulseResult);

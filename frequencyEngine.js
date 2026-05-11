@@ -16,11 +16,23 @@
     const PERIOD_MIN = 0;
     const PERIOD_MAX = 2047;
     const TIA_AUDF_MAX = 31;
+    const POKEY_AUDF_MAX = 255;
+    // POKEY clock fisso 64 kHz: AUDCTL=$00, niente joined 16-bit, niente
+    // 1.79 MHz per CH1/CH3, niente filtri. Scope v1 — vedi README.
+    const POKEY_CLOCK_HZ = 64000;
     const NES_NOISE_PERIODS = [4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068];
     const TIA_TIMBRE_OPTIONS = [
       { label: "Pure tone", audc: 12 },
       { label: "Buzz", audc: 1 },
       { label: "Noise", audc: 8 },
+    ];
+    // AUDC bits 5-7 selezionano il distortion mode (vedi Furnace POKEY doc):
+    // $A0 = pure square, $E0 = buzz (poly4), $80 = soft noise (poly17).
+    // Bits 0-3 (volume) e bit 4 (volume-only) li mantiene il player a runtime.
+    const POKEY_TIMBRE_OPTIONS = [
+      { label: "Pure tone", audc: 0xA0 },
+      { label: "Buzz",      audc: 0xE0 },
+      { label: "Noise",     audc: 0x80 },
     ];
     const TIA_AUDC1_HZ = [
       2080, 1040, 693.3, 520, 416, 346.7, 297.1, 260, 231.1, 208, 189.1, 173.3, 160,
@@ -75,6 +87,26 @@
       8: buildTiaTable(8, TIA_AUDC8_HZ),
     };
 
+    // POKEY: tutti e 3 i timbres usano lo stesso clock 64 kHz e quindi la
+    // stessa tabella di frequenze. Differiscono solo per come l'audio
+    // synth e il player chip interpretano AUDC (square vs buzz vs noise).
+    function buildPokeyTable(audc) {
+      return {
+        chip: "POKEY",
+        audc,
+        entries: Array.from({ length: POKEY_AUDF_MAX + 1 }, (_, audf) => ({
+          hz: POKEY_CLOCK_HZ / (2 * (audf + 1)),
+          audf,
+        })),
+      };
+    }
+
+    const POKEY_FREQUENCY_TABLES = {
+      0xA0: buildPokeyTable(0xA0),
+      0xE0: buildPokeyTable(0xE0),
+      0x80: buildPokeyTable(0x80),
+    };
+
     function getFrequencyTable(chip = "NES_PULSE") {
       switch (chip) {
         case "NES_PULSE":
@@ -93,6 +125,16 @@
 
       if (!table) {
         throw new Error(`AUDC TIA non supportato: ${audc}`);
+      }
+
+      return table;
+    }
+
+    function getPokeyFrequencyTable(audc) {
+      const table = POKEY_FREQUENCY_TABLES[audc];
+
+      if (!table) {
+        throw new Error(`AUDC POKEY non supportato: ${audc}`);
       }
 
       return table;
@@ -159,6 +201,34 @@
       };
     }
 
+    function getNearestPokeyNote(targetHz, audc) {
+      if (!Number.isFinite(targetHz) || targetHz <= 0) {
+        throw new Error("targetHz must be a positive number");
+      }
+
+      const table = getPokeyFrequencyTable(audc);
+      let bestEntry = table.entries[0];
+      let bestDistance = Math.abs(bestEntry.hz - targetHz);
+
+      for (const entry of table.entries) {
+        const distance = Math.abs(entry.hz - targetHz);
+
+        if (distance < bestDistance) {
+          bestEntry = entry;
+          bestDistance = distance;
+        }
+      }
+
+      const scartoCents = 1200 * Math.log2(bestEntry.hz / targetHz);
+
+      return {
+        hz_piu_vicino: bestEntry.hz,
+        valore_registro: bestEntry.audf,
+        scarto_cents: scartoCents,
+        intonato: Math.abs(scartoCents) < 10,
+      };
+    }
+
     function getNoisePeriodEntry(index) {
       const entry = NES_NOISE_PERIOD_TABLE.entries[index];
 
@@ -175,11 +245,15 @@
       NES_NOISE_PERIOD_TABLE,
       TIA_FREQUENCY_TABLES,
       TIA_TIMBRE_OPTIONS,
+      POKEY_FREQUENCY_TABLES,
+      POKEY_TIMBRE_OPTIONS,
       getFrequencyTable,
       getNearestNote,
       getNearestTiaNote,
+      getNearestPokeyNote,
       getNoisePeriodEntry,
       getTiaFrequencyTable,
+      getPokeyFrequencyTable,
     };
   },
 );
