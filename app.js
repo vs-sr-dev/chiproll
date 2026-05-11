@@ -55,9 +55,9 @@
     NES: {
       heroTitle: "ChipRoll - NES / Famicom",
       heroCopy:
-        "Three separate NES channels, 16 steps and instant playback. Pulse and Triangle are pitched; Noise is percussive.",
+        "Four separate NES channels, 16 steps and instant playback. Pulse 1 / Pulse 2 / Triangle are pitched; Noise is percussive.",
       heroChip: "NES / Famicom",
-      panelTitle: "Pulse 1 / Triangle / Noise",
+      panelTitle: "Pulse 1 / Pulse 2 / Triangle / Noise",
     },
     TIA: {
       heroTitle: "ChipRoll - Atari TIA",
@@ -71,6 +71,18 @@
     {
       id: "pulse1",
       name: "Pulse 1",
+      chip: "NES_PULSE",
+      profile: "NES",
+      kind: "pitched",
+      waveform: "square",
+      laneClass: "pulse",
+      rowLabel: "Note / Step",
+      supportsIntonation: true,
+      rows: buildNoteRange("C2", "C7"),
+    },
+    {
+      id: "pulse2",
+      name: "Pulse 2",
       chip: "NES_PULSE",
       profile: "NES",
       kind: "pitched",
@@ -2261,7 +2273,7 @@
     const channels = NES_CHANNEL_DEFS;
     const lines = [
       `# TRACK 0 ${appState.bpm} 6 "Exported from ChipRoll"`,
-      "# COLUMNS : 1 1 1",
+      "# COLUMNS : 1 1 1 1",
       "# ORDER 0 : 0",
       "# PATTERN 0",
     ];
