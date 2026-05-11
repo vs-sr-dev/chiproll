@@ -109,14 +109,55 @@
     { id: "tia1", name: "TIA Ch.1", profile: "TIA" },
     { id: "tia2", name: "TIA Ch.2", profile: "TIA" },
   ];
+  // Pattern-aware state (Step 1 del refactor patterns/song).
+  // - patterns: dict { [id]: Pattern }, dove Pattern = { id, label, stepCount, channels: { [id]: { notes: Map, audc? } } }
+  // - channelGlobals: mixer state (muted/solo/collapsed) trasversale a tutti i pattern.
+  // - patternOrder: ordine dei pattern nel rack (puo' divergere da song).
+  // - song: sequenza di patternId per Song mode.
+  // - currentPatternId / transportMode: stato di edit/playback, salvati nel JSON.
   const appState = {
     activeChip: "NES",
-    channelState: {},
     tiaRowsByAudc: {},
     bpm: 120,
-    stepCount: 16,
     loop: false,
+    patterns: {},
+    patternOrder: [],
+    song: [],
+    currentPatternId: null,
+    transportMode: "pattern",
+    channelGlobals: {},
   };
+
+  // Counter per la generazione di ID pattern (P1, P2, ...). Non si decrementa mai
+  // alla delete per evitare collisioni con pattern referenziati nella song.
+  let patternIdCounter = 0;
+
+  function nextPatternId() {
+    patternIdCounter += 1;
+    return `P${patternIdCounter}`;
+  }
+
+  function currentPattern() {
+    return appState.patterns[appState.currentPatternId];
+  }
+
+  function currentStepCount() {
+    const pattern = currentPattern();
+    return pattern ? pattern.stepCount : 16;
+  }
+
+  function channelData(channelId, patternId = appState.currentPatternId) {
+    const pattern = appState.patterns[patternId];
+    return pattern ? pattern.channels[channelId] : undefined;
+  }
+
+  function channelMixer(channelId) {
+    return appState.channelGlobals[channelId];
+  }
+
+  function getChannelIds() {
+    return Object.keys(appState.channelGlobals);
+  }
   const importSession = {
     parsedSong: null,
     result: null,
@@ -241,7 +282,7 @@
 
   chipSelect.value = appState.activeChip;
   bpmInput.value = String(appState.bpm);
-  stepCountSelect.value = String(appState.stepCount);
+  stepCountSelect.value = String(currentStepCount());
   updateTransportState();
   updateLoopButtonVisual();
   render();
@@ -283,9 +324,10 @@
   }
 
   function renderChannel(channel) {
-    const state = appState.channelState[channel.id];
+    const data = channelData(channel.id);
+    const mixer = channelMixer(channel.id);
     const lane = document.createElement("section");
-    lane.className = `channel-lane lane-${channel.laneClass} ${state.collapsed ? "collapsed" : ""}`.trim();
+    lane.className = `channel-lane lane-${channel.laneClass} ${mixer.collapsed ? "collapsed" : ""}`.trim();
 
     const laneHeader = document.createElement("div");
     laneHeader.className = "channel-header";
@@ -311,28 +353,28 @@
     const collapseButton = document.createElement("button");
     collapseButton.type = "button";
     collapseButton.className = "lane-button collapse-button";
-    collapseButton.textContent = state.collapsed ? "^" : "v";
+    collapseButton.textContent = mixer.collapsed ? "^" : "v";
     collapseButton.setAttribute(
       "aria-label",
-      state.collapsed ? `Expand ${channel.name}` : `Collapse ${channel.name}`,
+      mixer.collapsed ? `Expand ${channel.name}` : `Collapse ${channel.name}`,
     );
     collapseButton.addEventListener("click", () => toggleCollapsed(channel.id));
 
     laneControls.appendChild(collapseButton);
 
     if (channel.profile === "TIA") {
-      laneControls.appendChild(renderTiaTimbreSelect(channel, state));
+      laneControls.appendChild(renderTiaTimbreSelect(channel, data));
     }
 
     const muteButton = document.createElement("button");
     muteButton.type = "button";
-    muteButton.className = `lane-button ${state.muted ? "active" : ""}`.trim();
+    muteButton.className = `lane-button ${mixer.muted ? "active" : ""}`.trim();
     muteButton.textContent = "Mute";
     muteButton.addEventListener("click", () => toggleMute(channel.id));
 
     const soloButton = document.createElement("button");
     soloButton.type = "button";
-    soloButton.className = `lane-button ${state.solo ? "active" : ""}`.trim();
+    soloButton.className = `lane-button ${mixer.solo ? "active" : ""}`.trim();
     soloButton.textContent = "Solo";
     soloButton.addEventListener("click", () => toggleSolo(channel.id));
 
@@ -343,10 +385,10 @@
     laneHeader.appendChild(laneControls);
     lane.appendChild(laneHeader);
 
-    if (state.collapsed) {
+    if (mixer.collapsed) {
       lane.appendChild(renderCollapsedSummary(channel.id));
     } else {
-      lane.appendChild(renderGrid(channel, state));
+      lane.appendChild(renderGrid(channel, data));
     }
 
     return lane;
@@ -355,7 +397,7 @@
   function renderCollapsedSummary(channelId) {
     const summary = document.createElement("div");
     summary.className = "collapsed-summary";
-    const noteCount = appState.channelState[channelId].notes.size;
+    const noteCount = channelData(channelId).notes.size;
     summary.textContent = noteCount === 0
       ? "Lane collapsed. No notes."
       : `Lane collapsed. ${noteCount} note${noteCount === 1 ? "" : "s"}.`;
@@ -425,7 +467,7 @@
     return button;
   }
 
-  function renderTiaTimbreSelect(channel, state) {
+  function renderTiaTimbreSelect(channel, data) {
     const wrapper = document.createElement("label");
     wrapper.className = "timbre-select-wrap";
 
@@ -447,27 +489,28 @@
       select.appendChild(optionElement);
     }
 
-    select.value = String(state.audc);
+    select.value = String(data.audc);
 
     wrapper.appendChild(text);
     wrapper.appendChild(select);
     return wrapper;
   }
 
-  function renderGrid(channel, state) {
+  function renderGrid(channel, data) {
     const layout = document.createElement("div");
     layout.className = "roll-layout";
 
+    const stepCount = currentStepCount();
     const grid = document.createElement("div");
     grid.className = "roll-grid";
-    grid.style.gridTemplateColumns = `88px repeat(${appState.stepCount}, minmax(0, 1fr))`;
+    grid.style.gridTemplateColumns = `88px repeat(${stepCount}, minmax(0, 1fr))`;
 
     const corner = document.createElement("div");
     corner.className = "corner-cell";
     corner.textContent = channel.rowLabel;
     grid.appendChild(corner);
 
-    for (let step = 0; step < appState.stepCount; step += 1) {
+    for (let step = 0; step < stepCount; step += 1) {
       const header = document.createElement("div");
       header.className = "step-header";
       header.textContent = String(step + 1).padStart(2, "0");
@@ -480,20 +523,20 @@
       label.textContent = row.label;
       grid.appendChild(label);
 
-      for (let step = 0; step < appState.stepCount; step += 1) {
+      for (let step = 0; step < stepCount; step += 1) {
         const key = `${row.id}:${step}`;
-        const occupied = state.notes.get(key);
+        const occupied = data.notes.get(key);
         // continuesLeft: la cella corrente e' marcata come continuazione e ha
         // un vicino sinistro nella stessa riga (tipicamente sempre vero per dati ben formati).
         // continuesRight: il vicino destro nella stessa riga e' marcato come continuazione.
         let continuesLeft = false;
         let continuesRight = false;
         if (occupied) {
-          if (occupied.isContinuation === true && step > 0 && state.notes.has(`${row.id}:${step - 1}`)) {
+          if (occupied.isContinuation === true && step > 0 && data.notes.has(`${row.id}:${step - 1}`)) {
             continuesLeft = true;
           }
-          if (step < appState.stepCount - 1) {
-            const nextEntry = state.notes.get(`${row.id}:${step + 1}`);
+          if (step < stepCount - 1) {
+            const nextEntry = data.notes.get(`${row.id}:${step + 1}`);
             if (nextEntry && nextEntry.isContinuation === true) {
               continuesRight = true;
             }
@@ -566,11 +609,11 @@
   }
 
   async function toggleCell(channel, row, step) {
-    const state = appState.channelState[channel.id];
+    const data = channelData(channel.id);
     const key = `${row.id}:${step}`;
 
-    if (state.notes.has(key)) {
-      state.notes.delete(key);
+    if (data.notes.has(key)) {
+      data.notes.delete(key);
       console.log(`[ChipRoll] Note removed: ${channel.name} / ${row.label} @ step ${step + 1}`);
       render();
       return;
@@ -579,7 +622,7 @@
     clearChannelStep(channel.id, step);
     const entry = createEntryForCell(channel, row, step);
     entry.isContinuation = false;
-    state.notes.set(key, entry);
+    data.notes.set(key, entry);
 
     console.log(`[ChipRoll] Note inserted: ${channel.name} / ${row.label} @ step ${step + 1}`, entry);
     await previewChannelEntry(channel, entry);
@@ -777,12 +820,12 @@
   }
 
   function findRunSpan(channelId, rowId, step) {
-    const state = appState.channelState[channelId];
-    if (!state) {
+    const data = channelData(channelId);
+    if (!data) {
       return null;
     }
 
-    const cur = state.notes.get(`${rowId}:${step}`);
+    const cur = data.notes.get(`${rowId}:${step}`);
     if (!cur) {
       return null;
     }
@@ -790,17 +833,18 @@
     // Vado indietro finche' la cella corrente e' una continuazione e c'e' un vicino.
     let runStart = step;
     while (runStart > 0) {
-      const e = state.notes.get(`${rowId}:${runStart}`);
+      const e = data.notes.get(`${rowId}:${runStart}`);
       if (!e || e.isContinuation !== true) break;
-      const prev = state.notes.get(`${rowId}:${runStart - 1}`);
+      const prev = data.notes.get(`${rowId}:${runStart - 1}`);
       if (!prev) break;
       runStart -= 1;
     }
 
     // Avanti finche' il vicino destro e' continuazione.
+    const stepCount = currentStepCount();
     let runEnd = runStart;
-    while (runEnd + 1 < appState.stepCount) {
-      const next = state.notes.get(`${rowId}:${runEnd + 1}`);
+    while (runEnd + 1 < stepCount) {
+      const next = data.notes.get(`${rowId}:${runEnd + 1}`);
       if (!next || next.isContinuation !== true) break;
       runEnd += 1;
     }
@@ -814,7 +858,7 @@
     }
 
     const { channel, row, channelId, startStep, currentStep } = dragState;
-    const state = appState.channelState[channelId];
+    const data = channelData(channelId);
     const minStep = Math.min(startStep, currentStep);
     const maxStep = Math.max(startStep, currentStep);
 
@@ -832,14 +876,14 @@
     for (let s = minStep; s <= maxStep; s += 1) {
       const cellKey = `${row.id}:${s}`;
 
-      if (state.notes.has(cellKey)) {
+      if (data.notes.has(cellKey)) {
         continue;
       }
 
       clearChannelStep(channelId, s);
       const entry = createEntryForCell(channel, row, s);
       entry.isContinuation = lastInsertedStep === s - 1;
-      state.notes.set(cellKey, entry);
+      data.notes.set(cellKey, entry);
       insertedCount += 1;
       lastInsertedStep = s;
 
@@ -866,7 +910,7 @@
     }
 
     const { channel, channelId, rowId, blockSpan, startStep, hoverStep } = dragState;
-    const state = appState.channelState[channelId];
+    const data = channelData(channelId);
     const offset = hoverStep - startStep;
 
     cleanupDragPreviewVisuals();
@@ -880,7 +924,7 @@
     const newStart = blockSpan.startStep + offset;
     const newEnd = blockSpan.endStep + offset;
 
-    if (newStart < 0 || newEnd >= appState.stepCount) {
+    if (newStart < 0 || newEnd >= currentStepCount()) {
       console.log("[ChipRoll] Move-block blocked: out of grid.");
       render();
       return;
@@ -889,11 +933,11 @@
     // Cattura entry source con offset relativo, poi cancella source.
     const captured = [];
     for (let s = blockSpan.startStep; s <= blockSpan.endStep; s += 1) {
-      const e = state.notes.get(`${rowId}:${s}`);
+      const e = data.notes.get(`${rowId}:${s}`);
       if (e) {
         captured.push({ relStep: s - blockSpan.startStep, entry: e });
       }
-      state.notes.delete(`${rowId}:${s}`);
+      data.notes.delete(`${rowId}:${s}`);
     }
 
     // Per ogni nuova posizione: clearChannelStep prima del set (stesso pattern di
@@ -907,7 +951,7 @@
         overwrittenCount += 1;
       }
       clearChannelStep(channelId, newStep);
-      state.notes.set(`${rowId}:${newStep}`, { ...entry, step: newStep });
+      data.notes.set(`${rowId}:${newStep}`, { ...entry, step: newStep });
     }
 
     console.log(
@@ -925,7 +969,7 @@
     }
 
     const { channel, channelId, row, rowId, blockSpan, targetRowId, targetRow } = dragState;
-    const state = appState.channelState[channelId];
+    const data = channelData(channelId);
 
     cleanupDragPreviewVisuals();
     dragState = null;
@@ -939,9 +983,9 @@
     // perche' la riga e' diversa: vanno ricreati). Cancello la source row.
     const continuationPattern = [];
     for (let s = blockSpan.startStep; s <= blockSpan.endStep; s += 1) {
-      const e = state.notes.get(`${rowId}:${s}`);
+      const e = data.notes.get(`${rowId}:${s}`);
       continuationPattern.push(e?.isContinuation === true);
-      state.notes.delete(`${rowId}:${s}`);
+      data.notes.delete(`${rowId}:${s}`);
     }
 
     // Scrivo target row con clearChannelStep (per coerenza con toggleCell).
@@ -953,7 +997,7 @@
       clearChannelStep(channelId, step);
       const newEntry = createEntryForCell(channel, targetRow, step);
       newEntry.isContinuation = continuationPattern[i];
-      state.notes.set(`${targetRowId}:${step}`, newEntry);
+      data.notes.set(`${targetRowId}:${step}`, newEntry);
       if (!firstEntry) firstEntry = newEntry;
     }
 
@@ -995,7 +1039,7 @@
 
   function scheduleOneCycle(context, sequenceStartTime) {
     const stepDurationSeconds = getStepDurationSeconds();
-    const stepCount = appState.stepCount;
+    const stepCount = currentStepCount();
 
     // Voice scheduling per canale, con run merging: una nota tenuta per piu'
     // step consecutivi (drag) scheda una sola voce con durata estesa, cosi'
@@ -1261,7 +1305,11 @@
   }
 
   function getEntryForStep(channelId, step) {
-    for (const entry of appState.channelState[channelId].notes.values()) {
+    const data = channelData(channelId);
+    if (!data) {
+      return null;
+    }
+    for (const entry of data.notes.values()) {
       if (entry.step === step) {
         return entry;
       }
@@ -1271,15 +1319,15 @@
   }
 
   function clearChannelStep(channelId, step) {
-    const state = appState.channelState[channelId];
+    const data = channelData(channelId);
 
-    if (!state) {
+    if (!data) {
       return;
     }
 
-    for (const [mapKey, value] of state.notes.entries()) {
+    for (const [mapKey, value] of data.notes.entries()) {
       if (value.step === step) {
-        state.notes.delete(mapKey);
+        data.notes.delete(mapKey);
       }
     }
   }
@@ -1302,38 +1350,52 @@
   }
 
   function resetChannelsForChip(chip) {
-    if (chip === "NES") {
-      appState.channelState = Object.fromEntries(
-        NES_CHANNEL_DEFS.map((channel) => [
-          channel.id,
-          {
-            notes: new Map(),
-            muted: false,
-            solo: false,
-            collapsed: false,
-          },
-        ]),
-      );
-      return;
+    // Cambio chip = reset completo: distruggo tutti i pattern esistenti
+    // (la struttura canali del nuovo chip e' diversa) e ricreo un singolo
+    // pattern vuoto P1. channelGlobals viene ricostruito per i canali del nuovo chip.
+    if (chip === "TIA") {
+      appState.tiaRowsByAudc = {
+        12: buildTiaRows(12),
+        1: buildTiaRows(1),
+        8: buildTiaRows(8),
+      };
     }
 
-    appState.tiaRowsByAudc = {
-      12: buildTiaRows(12),
-      1: buildTiaRows(1),
-      8: buildTiaRows(8),
-    };
-    appState.channelState = Object.fromEntries(
-      TIA_CHANNEL_DEFS.map((channel) => [
+    const channelDefs = chip === "NES" ? NES_CHANNEL_DEFS : TIA_CHANNEL_DEFS;
+
+    appState.channelGlobals = Object.fromEntries(
+      channelDefs.map((channel) => [
         channel.id,
-        {
-          notes: new Map(),
-          muted: false,
-          solo: false,
-          audc: 12,
-          collapsed: false,
-        },
+        { muted: false, solo: false, collapsed: false },
       ]),
     );
+
+    patternIdCounter = 0;
+    const firstPatternId = nextPatternId();
+    appState.patterns = {
+      [firstPatternId]: createEmptyPattern(firstPatternId, chip, 16),
+    };
+    appState.patternOrder = [firstPatternId];
+    appState.song = [firstPatternId];
+    appState.currentPatternId = firstPatternId;
+    appState.transportMode = "pattern";
+  }
+
+  function createEmptyPattern(id, chip, stepCount) {
+    const channelDefs = chip === "NES" ? NES_CHANNEL_DEFS : TIA_CHANNEL_DEFS;
+    return {
+      id,
+      label: null,
+      stepCount,
+      channels: Object.fromEntries(
+        channelDefs.map((channel) => [
+          channel.id,
+          chip === "TIA"
+            ? { notes: new Map(), audc: 12 }
+            : { notes: new Map() },
+        ]),
+      ),
+    };
   }
 
   function getCurrentChannels() {
@@ -1342,8 +1404,8 @@
     }
 
     return TIA_CHANNEL_DEFS.map((channel) => {
-      const state = appState.channelState[channel.id];
-      const audc = state.audc;
+      const data = channelData(channel.id);
+      const audc = data.audc;
       const timbre = TIA_TIMBRE_OPTIONS.find((option) => option.audc === audc);
 
       return {
@@ -1375,50 +1437,57 @@
   }
 
   function changeTiaTimbre(channelId, audc) {
-    const state = appState.channelState[channelId];
+    // AUDC e' per-pattern (decisione Y del design): cambiare timbro su Ch.1
+    // tocca solo il pattern in edit. Le note esistenti del pattern corrente
+    // su questo canale vengono cancellate perche' le righe (lookup AUDF) sono
+    // fisicamente diverse tra timbri.
+    const data = channelData(channelId);
 
-    if (!state || !appState.tiaRowsByAudc[audc]) {
+    if (!data || !appState.tiaRowsByAudc[audc]) {
       return;
     }
 
-    state.audc = audc;
-    state.notes.clear();
+    data.audc = audc;
+    data.notes.clear();
     render();
   }
 
   function toggleMute(channelId) {
-    if (!appState.channelState[channelId]) {
+    const mixer = channelMixer(channelId);
+    if (!mixer) {
       return;
     }
 
-    appState.channelState[channelId].muted = !appState.channelState[channelId].muted;
+    mixer.muted = !mixer.muted;
     render();
   }
 
   function toggleSolo(channelId) {
-    if (!appState.channelState[channelId]) {
+    const mixer = channelMixer(channelId);
+    if (!mixer) {
       return;
     }
 
-    appState.channelState[channelId].solo = !appState.channelState[channelId].solo;
+    mixer.solo = !mixer.solo;
     render();
   }
 
   function toggleCollapsed(channelId) {
-    if (!appState.channelState[channelId]) {
+    const mixer = channelMixer(channelId);
+    if (!mixer) {
       return;
     }
 
-    appState.channelState[channelId].collapsed = !appState.channelState[channelId].collapsed;
+    mixer.collapsed = !mixer.collapsed;
     render();
   }
 
   function isChannelAudible(channelId) {
     const currentChannels = getCurrentChannels();
-    const anySolo = currentChannels.some((channel) => appState.channelState[channel.id].solo);
-    const state = appState.channelState[channelId];
+    const anySolo = currentChannels.some((channel) => channelMixer(channel.id).solo);
+    const mixer = channelMixer(channelId);
 
-    if (state.muted) {
+    if (mixer.muted) {
       return false;
     }
 
@@ -1426,7 +1495,7 @@
       return true;
     }
 
-    return state.solo;
+    return mixer.solo;
   }
 
   function clearAllNotes() {
@@ -1436,8 +1505,10 @@
       return;
     }
 
-    for (const channelId of Object.keys(appState.channelState)) {
-      appState.channelState[channelId].notes.clear();
+    // Clear delle note nel pattern in edit (non tocca gli altri pattern).
+    const pattern = currentPattern();
+    for (const channelId of Object.keys(pattern.channels)) {
+      pattern.channels[channelId].notes.clear();
     }
 
     render();
@@ -1824,8 +1895,12 @@
       chipSelect.value = payload.chip;
       resetChannelsForChip(payload.chip);
     } else {
-      for (const id of Object.keys(appState.channelState)) {
-        appState.channelState[id].notes.clear();
+      // Import nello stesso chip: svuoto le note del pattern in edit
+      // (gli altri pattern restano intatti, coerente con "import sovrascrive
+      // il piano roll corrente" ma scoped al pattern).
+      const pattern = currentPattern();
+      for (const id of Object.keys(pattern.channels)) {
+        pattern.channels[id].notes.clear();
       }
     }
 
@@ -1848,7 +1923,7 @@
     console.log("[ChipRoll Import] Import applied.", {
       chip: appState.activeChip,
       bpm: appState.bpm,
-      stepCount: appState.stepCount,
+      stepCount: currentStepCount(),
       notesWritten: totalNotesWritten,
       warnings: warnings.length,
     });
@@ -1872,16 +1947,16 @@
     let notesWritten = 0;
     const { track, channel: channelId, personality } = assignment;
 
-    const state = appState.channelState[channelId];
+    const data = channelData(channelId);
 
-    if (!state) {
+    if (!data) {
       warnings.push(`Channel ${channelId} not available on the ${appState.activeChip} chip. Skipped.`);
       return { warnings, notesWritten };
     }
 
     // For TIA, AUDC depends on the chosen personality: Pure Tone / Buzz / Noise.
     if (appState.activeChip === "TIA") {
-      state.audc = personalityToAudc(personality);
+      data.audc = personalityToAudc(personality);
     }
 
     const channelDef = getCurrentChannels().find((c) => c.id === channelId);
@@ -1899,15 +1974,15 @@
         continue;
       }
 
-      if (note.step >= appState.stepCount) {
+      if (note.step >= currentStepCount()) {
         droppedOutOfGrid += 1;
         continue;
       }
 
       let duration = Math.max(1, Number.isInteger(note.duration) ? note.duration : 1);
 
-      if (note.step + duration > appState.stepCount) {
-        duration = appState.stepCount - note.step;
+      if (note.step + duration > currentStepCount()) {
+        duration = currentStepCount() - note.step;
         clippedAtBoundary += 1;
       }
 
@@ -1918,12 +1993,12 @@
         continue;
       }
 
-      notesWritten += insertImportedRun(channelDef, state, row, note.step, duration);
+      notesWritten += insertImportedRun(channelDef, data, row, note.step, duration);
     }
 
     if (droppedOutOfGrid > 0) {
       warnings.push(
-        `${channelDef.name}: ${droppedOutOfGrid} note${droppedOutOfGrid === 1 ? "" : "s"} past step ${appState.stepCount} dropped. ` +
+        `${channelDef.name}: ${droppedOutOfGrid} note${droppedOutOfGrid === 1 ? "" : "s"} past step ${currentStepCount()} dropped. ` +
           `Extend the grid (8/16/32) or import a different section.`,
       );
     }
@@ -1935,14 +2010,14 @@
     return { warnings, notesWritten };
   }
 
-  function insertImportedRun(channel, state, row, startStep, duration) {
+  function insertImportedRun(channel, data, row, startStep, duration) {
     let inserted = 0;
 
     for (let i = 0; i < duration; i += 1) {
       const step = startStep + i;
       const key = `${row.id}:${step}`;
 
-      if (state.notes.has(key)) {
+      if (data.notes.has(key)) {
         continue;
       }
 
@@ -1951,7 +2026,7 @@
 
       const entry = createEntryForCell(channel, row, step);
       entry.isContinuation = i > 0;
-      state.notes.set(key, entry);
+      data.notes.set(key, entry);
       inserted += 1;
     }
 
@@ -2054,8 +2129,14 @@
   }
 
   function hasExistingPianoRollNotes() {
-    for (const channelId of Object.keys(appState.channelState)) {
-      if (appState.channelState[channelId].notes.size > 0) {
+    // Controllo solo il pattern in edit: il pannello import sovrascrive
+    // il pattern corrente, non gli altri.
+    const pattern = currentPattern();
+    if (!pattern) {
+      return false;
+    }
+    for (const channelId of Object.keys(pattern.channels)) {
+      if (pattern.channels[channelId].notes.size > 0) {
         return true;
       }
     }
@@ -2162,16 +2243,17 @@
     const value = Number(event.target.value);
 
     if (!STEP_COUNT_OPTIONS.includes(value)) {
-      event.target.value = String(appState.stepCount);
+      event.target.value = String(currentStepCount());
       return;
     }
 
-    if (value === appState.stepCount) {
+    if (value === currentStepCount()) {
       return;
     }
 
     stopPlayback();
-    appState.stepCount = value;
+    // stepCount e' per-pattern: la modifica tocca solo il pattern in edit.
+    currentPattern().stepCount = value;
     render();
   }
 
@@ -2184,7 +2266,7 @@
       "# PATTERN 0",
     ];
 
-    for (let step = 0; step < appState.stepCount; step += 1) {
+    for (let step = 0; step < currentStepCount(); step += 1) {
       const cells = channels.map((channel) => formatFamiTrackerCell(channel.id, getEntryForStep(channel.id, step)));
       lines.push(`ROW ${String(step).padStart(2, "0")} : ${cells.join(" : ")}`);
     }
@@ -2236,7 +2318,7 @@
     let currentSymbol = null;
     let currentDuration = 0;
 
-    for (let step = 0; step < appState.stepCount; step += 1) {
+    for (let step = 0; step < currentStepCount(); step += 1) {
       const entry = getEntryForStep(channelId, step);
       const symbol = entry ? toAssemblySymbol(channelId, entry.noteName) : "NOTE_REST";
       // Una nota con isContinuation=true estende il run precedente.
@@ -2272,16 +2354,16 @@
     const snapshot = {
       active_chip: appState.activeChip,
       bpm: appState.bpm,
-      step_count: appState.stepCount,
+      step_count: currentStepCount(),
       channels: channels.map((channel) => ({
         id: channel.id,
         name: channel.name,
         kind: channel.kind,
         timbre: channel.profile === "TIA" ? channel.timbreLabel : null,
         audc: channel.profile === "TIA" ? channel.audc : null,
-        muted: appState.channelState[channel.id].muted,
-        solo: appState.channelState[channel.id].solo,
-        steps: Array.from({ length: appState.stepCount }, (_, step) => {
+        muted: channelMixer(channel.id).muted,
+        solo: channelMixer(channel.id).solo,
+        steps: Array.from({ length: currentStepCount() }, (_, step) => {
           const entry = getEntryForStep(channel.id, step);
 
           if (!entry) {
