@@ -3390,10 +3390,18 @@
 
   function buildPokeyCa65Assembly() {
     // Layout: per ogni pattern una label `pokey_pattern_PN:` con uno stream
-    // di 8 byte per step (4 canali x AUDF,AUDC). AUDC byte = high nibble
-    // (distortion: $A0/$E0/$80) OR'd con low nibble (volume 0-15). Sui rest
-    // AUDF=AUDC=$00 (volume 0 = silenzio garantito sul chip reale: POKEY
-    // non auto-mute senza una scrittura esplicita di volume 0).
+    // di 9 byte per step (4 canali x (AUDF, AUDC), poi 1 byte onset mask).
+    // AUDC byte = high nibble (distortion: $A0/$E0/$80) OR'd con low nibble
+    // (volume 0-15). Sui rest AUDF=AUDC=$00 (volume 0 = silenzio garantito
+    // sul chip reale: POKEY non auto-mute senza una scrittura esplicita di
+    // volume 0). Onset byte: bit n (0..3) = "new onset" per il canale n+1
+    // (un nota nuova vs continuation). Il player tipico, quando il bit e'
+    // settato, scrive AUDC=$00 per un frame e applica il vero AUDC al frame
+    // successivo, cosi' due note adiacenti dello stesso pitch si percepiscono
+    // come due note distinte (POKEY non ha envelope hardware, stesso problema
+    // del TIA). entry.isContinuation === true (drag-fill o MIDI sustain) NON
+    // setta il bit. Bit 7 di AUDC e' occupato dal distortion code, quindi il
+    // marker non puo' essere in-band come sul TIA (AUDV bit 7).
     // AUDCTL = $00 setup-time: nessun joined 16-bit, nessun filtro, clock
     // 64 kHz su tutti i canali. Player tipico: scrive AUDCTL=$00 a $D208
     // una volta init, poi stream pattern data a $D200..$D207 ogni frame.
@@ -3405,7 +3413,10 @@
       "; Exported from ChipRoll - POKEY-native ca65 (song-aware)",
       `; BPM: ${appState.bpm}`,
       "; AUDCTL = $00 (64 kHz clock, no joined, no filters). Set once at init.",
-      "; Format per step: 4 channels x (AUDF, AUDC) = 8 bytes.",
+      "; Format per step: 4 channels x (AUDF, AUDC) = 8 bytes, then 1 onset",
+      "; bitmask byte (bit n = new-onset flag for channel n+1, drag-sustain",
+      "; clears the bit). Player writes AUDC=$00 for one frame on onset bits",
+      "; to articulate adjacent same-pitch notes (POKEY has no envelope).",
       "; AUDC byte: high nibble = distortion ($A=pure $E=buzz $8=noise),",
       "; low nibble = volume (0-15, $F = full). AUDC=$00 = silent step.",
       "",
@@ -3426,16 +3437,23 @@
 
       for (let step = 0; step < pattern.stepCount; step += 1) {
         const bytes = [];
+        let onsetMask = 0;
+        let chIdx = 0;
         for (const channel of POKEY_CHANNEL_DEFS) {
           const entry = getEntryForStep(channel.id, step, patternId);
           if (entry) {
             const audf = entry.registro ?? 0;
             const audc = ((entry.audc ?? 0) | VOLUME_FULL) & 0xFF;
             bytes.push(audf, audc);
+            if (entry.isContinuation !== true) {
+              onsetMask |= (1 << chIdx);
+            }
           } else {
             bytes.push(0, 0);
           }
+          chIdx += 1;
         }
+        bytes.push(onsetMask);
         const hex = bytes.map((b) => `$${toUpperHex(b, 2)}`).join(", ");
         lines.push(`  .byte ${hex}   ; step ${step}`);
       }
