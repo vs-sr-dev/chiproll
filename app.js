@@ -1,5 +1,6 @@
 (function buildChipRollApp() {
   const root = document.getElementById("piano-roll-root");
+  const patternRackRoot = document.getElementById("pattern-rack");
   const chipSelect = document.getElementById("chip-select");
   const heroTitle = document.getElementById("hero-title");
   const heroCopy = document.getElementById("hero-copy");
@@ -170,6 +171,171 @@
   function getChannelIds() {
     return Object.keys(appState.channelGlobals);
   }
+
+  // Pattern in edit-label inline. null = nessun pattern in editing.
+  // Quando settato, renderPatternRack() disegna un <input> al posto della pill.
+  let editingPatternLabelId = null;
+
+  function renderPatternRack() {
+    patternRackRoot.innerHTML = "";
+
+    const onlyOnePattern = appState.patternOrder.length === 1;
+
+    for (const patternId of appState.patternOrder) {
+      const pattern = appState.patterns[patternId];
+      const isActive = patternId === appState.currentPatternId;
+      const isEditing = patternId === editingPatternLabelId;
+
+      if (isEditing) {
+        patternRackRoot.appendChild(renderPatternLabelInput(pattern));
+        continue;
+      }
+
+      const pill = document.createElement("button");
+      pill.type = "button";
+      pill.className = `pattern-pill ${isActive ? "active" : ""}`.trim();
+      pill.setAttribute("role", "tab");
+      pill.setAttribute("aria-selected", String(isActive));
+      pill.dataset.patternId = patternId;
+
+      const idSpan = document.createElement("span");
+      idSpan.className = "pattern-pill-id";
+      idSpan.textContent = patternId;
+      pill.appendChild(idSpan);
+
+      if (pattern.label) {
+        const labelSpan = document.createElement("span");
+        labelSpan.className = "pattern-pill-label";
+        labelSpan.textContent = pattern.label;
+        pill.appendChild(labelSpan);
+      }
+
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "pattern-pill-delete";
+      deleteButton.setAttribute("aria-label", `Delete pattern ${patternId}`);
+      deleteButton.textContent = "×";
+      if (onlyOnePattern) {
+        deleteButton.disabled = true;
+      }
+      deleteButton.addEventListener("click", (event) => {
+        // Stop propagation: il click sulla X non deve switchare al pattern.
+        event.stopPropagation();
+        deletePattern(patternId);
+      });
+      pill.appendChild(deleteButton);
+
+      pill.addEventListener("click", () => switchPattern(patternId));
+      pill.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        editingPatternLabelId = patternId;
+        renderPatternRack();
+      });
+
+      patternRackRoot.appendChild(pill);
+    }
+
+    const addButton = document.createElement("button");
+    addButton.type = "button";
+    addButton.className = "pattern-rack-add";
+    addButton.setAttribute("aria-label", "Add pattern");
+    addButton.textContent = "+";
+    addButton.addEventListener("click", createPattern);
+    patternRackRoot.appendChild(addButton);
+  }
+
+  function renderPatternLabelInput(pattern) {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "pattern-pill-label-input";
+    input.value = pattern.label || "";
+    input.placeholder = pattern.id;
+    input.setAttribute("aria-label", `Rename ${pattern.id}`);
+    input.maxLength = 32;
+
+    const commit = () => {
+      const value = input.value.trim();
+      pattern.label = value === "" ? null : value;
+      editingPatternLabelId = null;
+      renderPatternRack();
+    };
+    const cancel = () => {
+      editingPatternLabelId = null;
+      renderPatternRack();
+    };
+
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commit();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        cancel();
+      }
+    });
+    input.addEventListener("blur", commit);
+    // Focus + select dopo il mount nel DOM (microtask).
+    queueMicrotask(() => {
+      input.focus();
+      input.select();
+    });
+    return input;
+  }
+
+  function switchPattern(id) {
+    if (id === appState.currentPatternId) {
+      return;
+    }
+    if (!appState.patterns[id]) {
+      return;
+    }
+    stopPlayback();
+    appState.currentPatternId = id;
+    render();
+  }
+
+  function createPattern() {
+    // Eredita stepCount del pattern corrente (decisione D1.opt1).
+    // Note vuote, AUDC TIA al default (12).
+    const inheritedStepCount = currentStepCount();
+    const newId = nextPatternId();
+    appState.patterns[newId] = createEmptyPattern(newId, appState.activeChip, inheritedStepCount);
+    appState.patternOrder.push(newId);
+    appState.song.push(newId);
+    stopPlayback();
+    appState.currentPatternId = newId;
+    render();
+  }
+
+  function deletePattern(id) {
+    if (appState.patternOrder.length <= 1) {
+      return;
+    }
+    if (!appState.patterns[id]) {
+      return;
+    }
+
+    const songRefs = appState.song.filter((pid) => pid === id).length;
+    if (songRefs > 0) {
+      const confirmed = window.confirm(
+        `Pattern ${id} is used ${songRefs} time${songRefs === 1 ? "" : "s"} in the song. Delete and remove from song?`,
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    appState.song = appState.song.filter((pid) => pid !== id);
+    appState.patternOrder = appState.patternOrder.filter((pid) => pid !== id);
+    delete appState.patterns[id];
+
+    if (appState.currentPatternId === id) {
+      appState.currentPatternId = appState.patternOrder[0];
+      stopPlayback();
+    }
+
+    render();
+  }
   const importSession = {
     parsedSong: null,
     result: null,
@@ -313,6 +479,12 @@
   });
 
   function render() {
+    // stepCount e' per-pattern: switchando pattern, il select del transport
+    // riflette il valore del nuovo pattern attivo.
+    stepCountSelect.value = String(currentStepCount());
+
+    renderPatternRack();
+
     root.innerHTML = "";
     updateHeaderCopy();
 

@@ -346,6 +346,127 @@ body {
   margin-bottom: 18px;
 }
 
+.pattern-rack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  background: rgba(255, 244, 230, 0.65);
+  border: 1px solid var(--grid);
+  border-radius: 18px;
+}
+
+.pattern-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--grid-strong);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.06s ease;
+  user-select: none;
+}
+
+.pattern-pill:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.pattern-pill.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fffaf4;
+}
+
+.pattern-pill.active:hover {
+  background: var(--accent);
+}
+
+.pattern-pill-id {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.pattern-pill-label {
+  opacity: 0.85;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pattern-pill-label::before {
+  content: "·";
+  margin-right: 4px;
+  opacity: 0.6;
+}
+
+.pattern-pill-delete {
+  display: none;
+  background: transparent;
+  border: 0;
+  padding: 0 0 0 4px;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.pattern-pill:hover .pattern-pill-delete {
+  display: inline-flex;
+}
+
+.pattern-pill-delete:hover {
+  opacity: 1;
+}
+
+.pattern-pill-delete[disabled] {
+  display: none;
+}
+
+.pattern-pill-label-input {
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 13px;
+  color: var(--text);
+  font-family: inherit;
+  max-width: 140px;
+  outline: none;
+}
+
+.pattern-rack-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: transparent;
+  border: 1px dashed var(--grid-strong);
+  border-radius: 999px;
+  color: var(--grid-strong);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.pattern-rack-add:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .transport {
   display: flex;
   align-items: center;
