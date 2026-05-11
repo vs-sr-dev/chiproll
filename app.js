@@ -910,6 +910,12 @@
           await copyExportText("ca65", buildCa65Assembly());
         }),
       );
+    } else if (appState.activeChip === "TIA") {
+      buttons.appendChild(
+        renderExportButton("TIA-native ca65", "tia-ca65", async () => {
+          await copyExportText("tia-ca65", buildTiaCa65Assembly());
+        }),
+      );
     }
 
     buttons.appendChild(
@@ -3092,6 +3098,76 @@
     }
 
     return runs;
+  }
+
+  function buildTiaCa65Assembly() {
+    // Layout: per ogni pattern, una label `pattern_PN:` con stream di triplette
+    // (AUDF, AUDC, AUDV), una riga per step, due canali per step (ch1 poi ch2).
+    // AUDV=0 marca silenzio. AUDC per-step segue entry.audc (per-pattern in pratica:
+    // changeTiaTimbre cancella le note quando l'AUDC del canale cambia).
+    // Alla fine, due tabelle song: song_pattern_table (.word per ogni pattern),
+    // song_length_table (step count per pattern), e song_order (sequenza di indici
+    // chiusa da $FF).
+    const lines = [
+      "; Exported from ChipRoll - TIA-native ca65",
+      `; BPM: ${appState.bpm}`,
+      "; Format per step: ch1 (AUDF, AUDC, AUDV), then ch2 (AUDF, AUDC, AUDV).",
+      "; AUDV=0 marks a silent step. Patterns may have different step counts.",
+      "",
+    ];
+
+    for (const patternId of appState.patternOrder) {
+      const pattern = appState.patterns[patternId];
+      if (!pattern) {
+        continue;
+      }
+
+      lines.push(`PATTERN_${patternId}_STEPS = ${pattern.stepCount}`);
+      lines.push(`pattern_${patternId}:`);
+
+      for (let step = 0; step < pattern.stepCount; step += 1) {
+        const bytes = [];
+        for (const channel of TIA_CHANNEL_DEFS) {
+          const entry = getEntryForStep(channel.id, step, patternId);
+          if (entry) {
+            const audf = entry.registro ?? 0;
+            const audc = entry.audc ?? 0;
+            bytes.push(audf, audc, 15);
+          } else {
+            bytes.push(0, 0, 0);
+          }
+        }
+        const hex = bytes.map((b) => `$${toUpperHex(b, 2)}`).join(", ");
+        lines.push(`  .byte ${hex}   ; step ${step}`);
+      }
+
+      lines.push("");
+    }
+
+    lines.push("; Song tables");
+    lines.push("song_pattern_table:");
+    for (const patternId of appState.patternOrder) {
+      lines.push(`  .word pattern_${patternId}`);
+    }
+
+    lines.push("song_length_table:");
+    for (const patternId of appState.patternOrder) {
+      lines.push(`  .byte PATTERN_${patternId}_STEPS`);
+    }
+
+    lines.push("song_order:");
+    if (appState.song.length === 0) {
+      lines.push("  .byte $FF   ; empty song");
+      lines.push("song_order_length = 0");
+    } else {
+      const indices = appState.song.map((sid) => appState.patternOrder.indexOf(sid));
+      const hex = indices.map((i) => `$${toUpperHex(i, 2)}`).join(", ");
+      lines.push(`  .byte ${hex}`);
+      lines.push("  .byte $FF   ; end marker");
+      lines.push(`song_order_length = ${appState.song.length}`);
+    }
+
+    return lines.join("\n");
   }
 
   function buildGenericSessionJson() {

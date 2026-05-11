@@ -45,8 +45,9 @@ It's not trying to replace anything. It's trying to be the path of least resista
 - BPM and PPQ from the MIDI carry over.
 
 ### Export
-- **FamiTracker text** — paste-ready ROW format.
-- **ca65 assembly** — run-length-encoded with named note constants. Long sustained notes collapse into single entries.
+- **FamiTracker text** (NES) — paste-ready ROW format.
+- **ca65 assembly** (NES) — run-length-encoded with named note constants. Long sustained notes collapse into single entries.
+- **TIA-native ca65** (TIA) — song-aware: one `pattern_PN:` label per pattern with `(AUDF, AUDC, AUDV)` triplets per step per channel, plus `song_pattern_table` / `song_length_table` / `song_order` so a player can iterate the song chain.
 - **Generic JSON** — full session snapshot, including actual chip frequencies and cents offsets for every step.
 
 ### Session
@@ -62,11 +63,10 @@ It's not trying to replace anything. It's trying to be the path of least resista
 ## Roadmap
 
 ### Completing the export cycle
-- **TIA-native ca65 export** — `.byte AUDF, AUDC, AUDV` triplets.
-- **ca65 note-constants header** — separate `.inc` file with all the note symbols used by the assembly export.
+- **ca65 note-constants header** — separate `.inc` file with all the note symbols used by the NES assembly export.
 
 ### Chip expansion
-- **Atari POKEY** — opens up serious composition for the 7800 (POKEY cart) and Atari 8-bit machines. Scoped as a dedicated session after TIA-native export lands.
+- **Atari POKEY** — opens up serious composition for the 7800 (POKEY cart) and Atari 8-bit machines. Scoped as a dedicated session.
 - **MusicXML import** — alternative to MIDI for those working from notation; already specified in the original brief (Step 8).
 
 ### Nice to have
