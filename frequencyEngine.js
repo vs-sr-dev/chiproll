@@ -75,12 +75,21 @@
         label: `Period ${index}`,
       })),
     };
+    // AUDC=12 (Pure tone) on a real TIA divides the audio prescaler (color
+    // clock / 114) by an extra 6. The previous formula omitted that ÷6 and
+    // produced frequencies six times higher than what the 2600 hardware
+    // actually outputs — a note labelled "C#7" played fine in the browser
+    // but came out as F#4 on Stella / real hardware. Matches the buzz and
+    // noise tables (which were already correct) in shape:
+    //   f = TIA_PAL_OSC_HZ / 114 / divisor / (AUDF+1)
+    // with divisor = 6 for pure tone, 15 for buzz (AUDC=1), 511 for poly9
+    // noise (AUDC=8).
     const TIA_FREQUENCY_TABLES = {
       12: buildTiaTable(
         12,
         Array.from(
           { length: TIA_AUDF_MAX + 1 },
-          (_, audf) => TIA_PAL_OSC_HZ / (114 * (audf + 1)),
+          (_, audf) => TIA_PAL_OSC_HZ / (114 * 6 * (audf + 1)),
         ),
       ),
       1: buildTiaTable(1, TIA_AUDC1_HZ),

@@ -35,7 +35,11 @@ assert.deepEqual(noiseEntry, {
 });
 assert.equal(TIA_FREQUENCY_TABLES[12].entries.length, 32);
 assert.equal(tiaPureTable.entries[0].audf, 0);
-assert.ok(Math.abs(tiaPureTable.entries[0].hz - 31113.105263157893) < 1e-9);
+// Pure tone (AUDC=12) uses divisor 6 on a real TIA:
+//   3546894 / (114 * 6 * 1) = 5185.5175438596... Hz at AUDF=0 (~E8)
+//   3546894 / (114 * 6 * 32) = 162.05... Hz at AUDF=31 (~E3)
+assert.ok(Math.abs(tiaPureTable.entries[0].hz - 5185.517543859649) < 1e-9);
+assert.ok(Math.abs(tiaPureTable.entries[31].hz - 162.04742324561403) < 1e-9);
 assert.equal(tiaBuzzTable.entries[0].hz, 2080);
 assert.equal(tiaBuzzTable.entries[31].hz, 65);
 
