@@ -54,7 +54,7 @@ It's not trying to replace anything. It's trying to be the path of least resista
 - **ca65 note-constants header** — separate `.inc` file with all the note symbols used by the assembly export.
 
 ### Chip expansion
-- **Atari POKEY** — opens up serious composition for the 7800 and Atari 8-bit machines.
+- **Atari POKEY** — opens up serious composition for the 7800 (POKEY cart) and Atari 8-bit machines. Scoped as a dedicated session after TIA-native export lands.
 - **MusicXML import** — alternative to MIDI for those working from notation; already specified in the original brief (Step 8).
 
 ### Nice to have
