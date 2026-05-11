@@ -20,13 +20,16 @@ button on a real composition.
 
 ## Prerequisites
 
-- `dasm` 2.20.14.1 (or later) at `D:\dasm\dasm.exe`. Download from
+- `dasm` 2.20.14.1 (or later). Download from
   [dasm-assembler/dasm releases](https://github.com/dasm-assembler/dasm/releases)
-  and unzip in place. The bundled `vcs.h` is what we include.
+  and unzip somewhere. The bundled `machines\atari2600\vcs.h` is what
+  `player.asm` includes.
 - Any 2600 emulator: [Stella](https://stella-emu.github.io/), or the Stella
   core in RetroArch.
 
-If your `dasm.exe` is somewhere else, set the env var before building:
+Point the `DASM` environment variable at the full path of your `dasm.exe`
+before building (the script derives the `machines\` include directory from
+there, so no other config is needed):
 
 ```cmd
 set DASM=C:\path\to\dasm.exe

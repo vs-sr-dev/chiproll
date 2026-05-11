@@ -4,17 +4,22 @@ setlocal
 rem ============================================================================
 rem Build the ChipRoll NES validation cart with cc65 (NROM mapper 0).
 rem
-rem Expects cc65 at D:\ca65 (where Samuele installed it). cl65 -t nes wraps
-rem ca65 + ld65 with the bundled nes.cfg, producing a 24 KiB .nes file
-rem (16 header + 16 PRG + 8 CHR). Override with `set CC65_HOME=...` if your
-rem install is elsewhere.
+rem Requires the CC65_HOME environment variable pointing to the root of a
+rem cc65 install (the directory containing `bin\cl65.exe`, e.g.
+rem `set CC65_HOME=C:\tools\cc65`). `cl65 -t nes` wraps ca65 + ld65 with
+rem the bundled NROM config and produces a 40 KiB .nes file (16 B iNES
+rem header + 32 KiB PRG + 8 KiB CHR).
 rem ============================================================================
 
-if "%CC65_HOME%"=="" set CC65_HOME=D:\ca65
+if "%CC65_HOME%"=="" (
+    echo ERROR: CC65_HOME environment variable not set.
+    echo Set it to the cc65 install root, e.g.:
+    echo   set CC65_HOME=C:\tools\cc65
+    exit /b 1
+)
 
 if not exist "%CC65_HOME%\bin\cl65.exe" (
     echo ERROR: cl65 not found at %CC65_HOME%\bin\cl65.exe
-    echo Set the CC65_HOME environment variable to the cc65 install root.
     exit /b 1
 )
 

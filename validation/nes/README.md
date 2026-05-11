@@ -24,8 +24,10 @@ manual edits required.
 
 ## Prerequisites
 
-- cc65 (`ca65` + `ld65` + `cl65`) at `D:\ca65\bin\`. If you installed it
-  elsewhere, set the `CC65_HOME` env var before building:
+- [cc65](https://cc65.github.io/) (provides `ca65` + `ld65` + `cl65`).
+  Download a binary build and unzip somewhere; point the `CC65_HOME`
+  environment variable at the install root (the directory containing
+  `bin\cl65.exe`):
   ```cmd
   set CC65_HOME=C:\path\to\cc65
   ```
