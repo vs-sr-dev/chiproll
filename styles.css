@@ -635,6 +635,50 @@ body {
   min-width: 84px;
 }
 
+.transport-mode-toggle {
+  display: inline-flex;
+  border: 1px solid var(--grid-strong);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(255, 250, 242, 0.92);
+}
+
+.transport-mode-button {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.transport-mode-button + .transport-mode-button {
+  border-left: 1px solid var(--grid-strong);
+}
+
+.transport-mode-button.active {
+  background: var(--accent);
+  color: #fffaf4;
+}
+
+.transport-mode-button:not(.active):hover {
+  background: var(--accent-soft);
+}
+
+.song-pill.playing {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fffaf4;
+  box-shadow: 0 0 0 2px rgba(217, 93, 57, 0.3);
+}
+
+.song-pill.playing:hover {
+  background: var(--accent);
+}
+
 .transport-buttons {
   display: flex;
   gap: 10px;

@@ -15,6 +15,8 @@
   const clearButton = document.getElementById("clear-button");
   const bpmInput = document.getElementById("bpm-input");
   const stepCountSelect = document.getElementById("step-count-select");
+  const modePatternButton = document.getElementById("mode-pattern-button");
+  const modeSongButton = document.getElementById("mode-song-button");
   const importButton = document.getElementById("import-button");
   const importOverlay = document.getElementById("import-overlay");
   const importClose = document.getElementById("import-close");
@@ -329,7 +331,8 @@
     slot.appendChild(indicator);
 
     const pill = document.createElement("span");
-    pill.className = "song-pill";
+    const isPlayingHere = index === activeSongIndex;
+    pill.className = `song-pill ${isPlayingHere ? "playing" : ""}`.trim();
     pill.setAttribute("role", "listitem");
     pill.draggable = true;
     pill.dataset.songIndex = String(index);
@@ -554,6 +557,7 @@
   let playbackCleanupTimerId = null;
   let playheadTimerIds = [];
   let activeStep = null;
+  let activeSongIndex = null;
   let copiedExportId = null;
   let copiedExportTimerId = null;
   let dragState = null;
@@ -588,6 +592,9 @@
   stepCountSelect.addEventListener("change", (event) => {
     handleStepCountChange(event);
   });
+
+  modePatternButton.addEventListener("click", () => setTransportMode("pattern"));
+  modeSongButton.addEventListener("click", () => setTransportMode("song"));
 
   importButton.addEventListener("click", openImportPanel);
   importClose.addEventListener("click", closeImportPanel);
@@ -669,6 +676,7 @@
   stepCountSelect.value = String(currentStepCount());
   updateTransportState();
   updateLoopButtonVisual();
+  updateTransportModeVisual();
   render();
 
   window.ChipRoll = window.ChipRoll || {};
@@ -1418,6 +1426,11 @@
   }
 
   async function startPlayback() {
+    if (appState.transportMode === "song" && appState.song.length === 0) {
+      console.warn("[ChipRoll] Song mode: song is empty, nothing to play");
+      return;
+    }
+
     stopPlayback();
 
     const context = await ensureAudioContext();
@@ -1425,24 +1438,73 @@
     updateTransportState();
 
     const schedulerOffsetSeconds = 0.03;
-    scheduleOneCycle(context, context.currentTime + schedulerOffsetSeconds);
+    const startTime = context.currentTime + schedulerOffsetSeconds;
+
+    if (appState.transportMode === "song") {
+      scheduleSongCycle(context, startTime);
+    } else {
+      schedulePatternModeCycle(context, startTime);
+    }
   }
 
-  function scheduleOneCycle(context, sequenceStartTime) {
+  // Pattern mode: schedula il pattern in edit, gestisce loop auto-richiamandosi.
+  function schedulePatternModeCycle(context, sequenceStartTime) {
+    const patternId = appState.currentPatternId;
+    const endTime = schedulePatternCycle(context, patternId, sequenceStartTime, null);
+
+    playbackCleanupTimerId = window.setTimeout(() => {
+      if (appState.loop && isPlaying) {
+        schedulePatternModeCycle(context, endTime);
+      } else {
+        finishPlayback();
+      }
+    }, Math.max(0, Math.ceil((endTime - context.currentTime) * 1000)));
+  }
+
+  // Song mode: schedula in sequenza tutti i pattern di appState.song.
+  // Ogni boundary e' un note-off implicito (non c'e' continuation cross-pattern).
+  function scheduleSongCycle(context, sequenceStartTime) {
+    let cursor = sequenceStartTime;
+    for (let i = 0; i < appState.song.length; i += 1) {
+      const patternId = appState.song[i];
+      cursor = schedulePatternCycle(context, patternId, cursor, i);
+    }
+    const cycleEndTime = cursor;
+
+    playbackCleanupTimerId = window.setTimeout(() => {
+      if (appState.loop && isPlaying) {
+        scheduleSongCycle(context, cycleEndTime);
+      } else {
+        finishPlayback();
+      }
+    }, Math.max(0, Math.ceil((cycleEndTime - context.currentTime) * 1000)));
+  }
+
+  // Schedula UNA passata di un singolo pattern. Ritorna l'endTime (cursor next).
+  // songIndex: posizione nella song se in Song mode (per playhead song lane);
+  //            null in Pattern mode.
+  function schedulePatternCycle(context, patternId, sequenceStartTime, songIndex) {
+    const pattern = appState.patterns[patternId];
+    if (!pattern) {
+      return sequenceStartTime;
+    }
+
     const stepDurationSeconds = getStepDurationSeconds();
-    const stepCount = currentStepCount();
+    const stepCount = pattern.stepCount;
+    const channels = getChannelsForPattern(patternId);
+    const isEditPattern = patternId === appState.currentPatternId;
 
     // Voice scheduling per canale, con run merging: una nota tenuta per piu'
     // step consecutivi (drag) scheda una sola voce con durata estesa, cosi'
     // l'inviluppo attack/release della Web Audio API non ricomincia ogni step.
-    for (const channel of getCurrentChannels()) {
+    for (const channel of channels) {
       if (!isChannelAudible(channel.id)) {
         continue;
       }
 
       let step = 0;
       while (step < stepCount) {
-        const entry = getEntryForStep(channel.id, step);
+        const entry = getEntryForStep(channel.id, step, patternId);
 
         if (!entry) {
           step += 1;
@@ -1456,10 +1518,11 @@
         }
 
         // Run = nota corrente + tutte le successive che la marcano come continuazione,
-        // restando sulla stessa riga.
+        // restando sulla stessa riga. Il merging non attraversa il bordo del pattern
+        // perche' iteriamo solo entro stepCount (note-off implicito al boundary).
         let runLength = 1;
         while (step + runLength < stepCount) {
-          const next = getEntryForStep(channel.id, step + runLength);
+          const next = getEntryForStep(channel.id, step + runLength, patternId);
           if (!next) break;
           if (next.rowId !== entry.rowId) break;
           if (next.isContinuation !== true) break;
@@ -1480,27 +1543,23 @@
       }
     }
 
-    // Playhead per step (visualizzazione: lo step attivo si muove ogni stepDur).
+    // Playhead step-by-step: aggiorna activeStep solo se questo pattern e' anche
+    // quello in edit (altrimenti il piano roll mostra un altro pattern e il
+    // playhead sarebbe fuorviante). activeSongIndex viene comunque aggiornato a
+    // ogni inizio pattern in Song mode.
     for (let step = 0; step < stepCount; step += 1) {
       const stepStartTime = sequenceStartTime + step * stepDurationSeconds;
       const playheadTimerId = window.setTimeout(() => {
-        activeStep = step;
+        if (songIndex !== null && step === 0) {
+          activeSongIndex = songIndex;
+        }
+        activeStep = isEditPattern ? step : null;
         render();
       }, Math.max(0, (stepStartTime - context.currentTime) * 1000));
-
       playheadTimerIds.push(playheadTimerId);
     }
 
-    const cycleEndTime = sequenceStartTime + stepCount * stepDurationSeconds;
-    playbackCleanupTimerId = window.setTimeout(() => {
-      if (appState.loop && isPlaying) {
-        // Riparte all'istante di fine ciclo: niente gap audio, lo scheduler accoda
-        // direttamente la prossima passata sui timestamp futuri.
-        scheduleOneCycle(context, cycleEndTime);
-      } else {
-        finishPlayback();
-      }
-    }, Math.max(0, Math.ceil((cycleEndTime - context.currentTime) * 1000)));
+    return sequenceStartTime + stepCount * stepDurationSeconds;
   }
 
   function schedulePlaybackVoice(context, waveform, hz, startTime, durationSeconds) {
@@ -1532,7 +1591,7 @@
   }
 
   function stopPlayback() {
-    if (!isPlaying && activeStep === null && activeVoices.size === 0) {
+    if (!isPlaying && activeStep === null && activeSongIndex === null && activeVoices.size === 0) {
       return;
     }
 
@@ -1544,6 +1603,7 @@
   function finishPlayback() {
     clearPlaybackTimers();
     activeStep = null;
+    activeSongIndex = null;
     isPlaying = false;
     updateTransportState();
     render();
@@ -1695,8 +1755,8 @@
     }
   }
 
-  function getEntryForStep(channelId, step) {
-    const data = channelData(channelId);
+  function getEntryForStep(channelId, step, patternId = appState.currentPatternId) {
+    const data = channelData(channelId, patternId);
     if (!data) {
       return null;
     }
@@ -1770,6 +1830,7 @@
     appState.song = [firstPatternId];
     appState.currentPatternId = firstPatternId;
     appState.transportMode = "pattern";
+    updateTransportModeVisual();
   }
 
   function createEmptyPattern(id, chip, stepCount) {
@@ -1790,12 +1851,16 @@
   }
 
   function getCurrentChannels() {
+    return getChannelsForPattern(appState.currentPatternId);
+  }
+
+  function getChannelsForPattern(patternId) {
     if (appState.activeChip === "NES") {
       return NES_CHANNEL_DEFS;
     }
 
     return TIA_CHANNEL_DEFS.map((channel) => {
-      const data = channelData(channel.id);
+      const data = channelData(channel.id, patternId);
       const audc = data.audc;
       const timbre = TIA_TIMBRE_OPTIONS.find((option) => option.audc === audc);
 
@@ -2569,6 +2634,26 @@
   function updateLoopButtonVisual() {
     loopButton.classList.toggle("loop-active", appState.loop);
     loopButton.setAttribute("aria-pressed", String(appState.loop));
+  }
+
+  function updateTransportModeVisual() {
+    const isSong = appState.transportMode === "song";
+    modePatternButton.classList.toggle("active", !isSong);
+    modePatternButton.setAttribute("aria-pressed", String(!isSong));
+    modeSongButton.classList.toggle("active", isSong);
+    modeSongButton.setAttribute("aria-pressed", String(isSong));
+  }
+
+  function setTransportMode(mode) {
+    if (mode !== "pattern" && mode !== "song") {
+      return;
+    }
+    if (appState.transportMode === mode) {
+      return;
+    }
+    stopPlayback();
+    appState.transportMode = mode;
+    updateTransportModeVisual();
   }
 
   async function handleGlobalKeydown(event) {
