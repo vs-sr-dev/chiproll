@@ -520,6 +520,63 @@
     render();
   }
 
+  function duplicatePattern(sourceId) {
+    const source = appState.patterns[sourceId];
+    if (!source) {
+      return;
+    }
+
+    const newId = nextPatternId();
+
+    // Deep clone canali + note. Le note sono oggetti plain; spread basta.
+    const channels = {};
+    for (const [chId, chData] of Object.entries(source.channels)) {
+      const notesMap = new Map();
+      for (const [key, entry] of chData.notes.entries()) {
+        notesMap.set(key, { ...entry });
+      }
+      const out = { notes: notesMap };
+      if (chData.audc !== undefined) {
+        out.audc = chData.audc;
+      }
+      channels[chId] = out;
+    }
+
+    appState.patterns[newId] = {
+      id: newId,
+      label: null,
+      stepCount: source.stepCount,
+      channels,
+    };
+
+    // Inserisce subito dopo il source nel rack; appende alla song
+    // (coerente con createPattern).
+    const orderIdx = appState.patternOrder.indexOf(sourceId);
+    if (orderIdx === -1) {
+      appState.patternOrder.push(newId);
+    } else {
+      appState.patternOrder.splice(orderIdx + 1, 0, newId);
+    }
+    appState.song.push(newId);
+
+    stopPlayback();
+    appState.currentPatternId = newId;
+    render();
+  }
+
+  function goToAdjacentPattern(direction) {
+    const order = appState.patternOrder;
+    if (order.length <= 1) {
+      return;
+    }
+    const idx = order.indexOf(appState.currentPatternId);
+    if (idx === -1) {
+      return;
+    }
+    const nextIdx = (idx + direction + order.length) % order.length;
+    switchPattern(order[nextIdx]);
+  }
+
   function deletePattern(id) {
     if (appState.patternOrder.length <= 1) {
       return;
@@ -2839,22 +2896,52 @@
   }
 
   async function handleGlobalKeydown(event) {
-    if (event.code !== "Space") {
-      return;
-    }
-
     if (isTextInputLike(event.target)) {
       return;
     }
 
-    event.preventDefault();
+    const modifier = event.ctrlKey || event.metaKey;
 
-    if (isPlaying) {
-      stopPlayback();
+    if (modifier) {
+      if (event.code === "KeyS") {
+        event.preventDefault();
+        handleSaveSession();
+        return;
+      }
+      if (event.code === "KeyO") {
+        event.preventDefault();
+        loadFileInput.click();
+        return;
+      }
+      if (event.code === "KeyD") {
+        event.preventDefault();
+        duplicatePattern(appState.currentPatternId);
+        return;
+      }
       return;
     }
 
-    await startPlayback();
+    if (event.code === "Space") {
+      event.preventDefault();
+      if (isPlaying) {
+        stopPlayback();
+        return;
+      }
+      await startPlayback();
+      return;
+    }
+
+    if (event.code === "BracketLeft") {
+      event.preventDefault();
+      goToAdjacentPattern(-1);
+      return;
+    }
+
+    if (event.code === "BracketRight") {
+      event.preventDefault();
+      goToAdjacentPattern(1);
+      return;
+    }
   }
 
   function isTextInputLike(target) {
