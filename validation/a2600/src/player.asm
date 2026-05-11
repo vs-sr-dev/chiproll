@@ -18,10 +18,11 @@
     include "vcs.h"
     include "macro.h"
 
-; FRAMES_PER_STEP: at 60 Hz NTSC, 15 frames/step ~= 4 steps per second, a
-; comfortable pace to hear the alternation in the demo song. Adjust to match
-; your composition's BPM if you re-export.
-FRAMES_PER_STEP equ 15
+; FRAMES_PER_STEP is read from the song's SONG_FRAMES_PER_STEP_NTSC symbol,
+; which ChipRoll emits in the TIA-native export based on the composition's
+; BPM. dasm resolves forward references across passes, so the symbol coming
+; from song.asm (included further down) works here.
+FRAMES_PER_STEP equ SONG_FRAMES_PER_STEP_NTSC
 
 ; ----------------------------------------------------------------------------
 ; Zero-page state
@@ -35,6 +36,8 @@ MusicPtrHi          ds 1
 OrderIndex          ds 1    ; index into song_order
 StepInPattern      ds 1    ; 0..CurrentPatternLength-1
 CurrentPatternLength ds 1   ; from song_length_table for active pattern
+SavedVol0           ds 1    ; deferred-volume slot for ch1 onset (0 = nothing pending)
+SavedVol1           ds 1    ; ditto ch2
 
 ; ----------------------------------------------------------------------------
 ; Code segment
@@ -108,12 +111,31 @@ OverscanLoop:
 
 ; ----------------------------------------------------------------------------
 ; TickMusic
-;   Once per NTSC frame; advances the song by one step every FRAMES_PER_STEP
-;   calls. On a step boundary, writes 6 bytes from (MusicPtr) into the TIA
-;   audio registers and bumps MusicPtr by 6. When MusicPtr reaches the end of
-;   the current pattern, advances OrderIndex (wrapping at $FF).
+;   Once per NTSC frame. First applies any volume saved from a previous step's
+;   onset (deferred by exactly one frame so adjacent same-pitch notes get a
+;   silence tic separating them — the TIA has no envelope hardware, so this
+;   software trick provides the articulation). Then, every FRAMES_PER_STEP
+;   frames, loads the next step's bytes into the TIA audio registers.
+;   AUDV bit 7 in the export marks a "new onset": when set, the player writes
+;   AUDV=0 this frame and saves the actual volume to be applied next frame.
+;   When clear, the AUDV byte is written through unchanged (rests = $00,
+;   continuations = $0F). Pattern-end advances OrderIndex (wrapping at $FF).
 ; ----------------------------------------------------------------------------
 TickMusic:
+    ; Apply any pending volume from the previous step's onset (1-frame delay).
+    LDA SavedVol0
+    BEQ NoVol0
+    STA AUDV0
+    LDA #0
+    STA SavedVol0
+NoVol0:
+    LDA SavedVol1
+    BEQ NoVol1
+    STA AUDV1
+    LDA #0
+    STA SavedVol1
+NoVol1:
+
     DEC FrameCounter
     BEQ DoStep
     RTS
@@ -122,7 +144,8 @@ DoStep:
     LDA #FRAMES_PER_STEP
     STA FrameCounter
 
-    ; Stream 6 bytes -> TIA audio regs.
+    ; Stream 6 bytes -> TIA audio regs. AUDV0/AUDV1 go through OnsetCheck so
+    ; bit 7 ("new onset") triggers the silence-then-volume articulation.
     LDY #0
     LDA (MusicPtrLo),Y
     STA AUDF0
@@ -130,8 +153,19 @@ DoStep:
     LDA (MusicPtrLo),Y
     STA AUDC0
     INY
-    LDA (MusicPtrLo),Y
+    LDA (MusicPtrLo),Y      ; raw AUDV ch1
+    TAX                     ; preserve raw byte in X
+    AND #$80
+    BEQ NoOnset0
+    LDA #0                  ; onset: silence this frame
     STA AUDV0
+    TXA
+    AND #$0F                ; low nibble = volume
+    STA SavedVol0           ; applied at next frame's TickMusic entry
+    JMP DoneAUDV0
+NoOnset0:
+    STX AUDV0               ; rest ($00) or continuation ($0F): write through
+DoneAUDV0:
     INY
     LDA (MusicPtrLo),Y
     STA AUDF1
@@ -139,8 +173,19 @@ DoStep:
     LDA (MusicPtrLo),Y
     STA AUDC1
     INY
-    LDA (MusicPtrLo),Y
+    LDA (MusicPtrLo),Y      ; raw AUDV ch2
+    TAX
+    AND #$80
+    BEQ NoOnset1
+    LDA #0
     STA AUDV1
+    TXA
+    AND #$0F
+    STA SavedVol1
+    JMP DoneAUDV1
+NoOnset1:
+    STX AUDV1
+DoneAUDV1:
 
     ; Advance pointer by 6 bytes (one step = 2 channels x 3 bytes).
     LDA MusicPtrLo

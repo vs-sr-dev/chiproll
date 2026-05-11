@@ -3292,16 +3292,34 @@
   function buildTiaCa65Assembly() {
     // Layout: per ogni pattern, una label `pattern_PN:` con stream di triplette
     // (AUDF, AUDC, AUDV), una riga per step, due canali per step (ch1 poi ch2).
-    // AUDV=0 marca silenzio. AUDC per-step segue entry.audc (per-pattern in pratica:
-    // changeTiaTimbre cancella le note quando l'AUDC del canale cambia).
+    // AUDV=$00 marca silenzio. AUDC per-step segue entry.audc (per-pattern in
+    // pratica: changeTiaTimbre cancella le note quando l'AUDC del canale cambia).
+    // AUDV bit 7 ($80) = "new onset" marker: il player puo' inserire un frame
+    // di silence prima della nota per articolare due note adiacenti dello stesso
+    // pitch (il TIA non ha envelope hardware, senza marker due note uguali
+    // suonano come una sola nota lunga). entry.isContinuation === true
+    // (drag-fill o MIDI sustain) NON setta il bit 7. Bit 7 mascherato via & $0F
+    // dal player prima di scrivere AUDV al chip.
+    // Header emette anche SONG_BPM e SONG_FRAMES_PER_STEP_{NTSC,PAL} cosi' il
+    // player puo' matchare il tempo della composizione senza configurazione.
     // Alla fine, due tabelle song: song_pattern_table (.word per ogni pattern),
-    // song_length_table (step count per pattern), e song_order (sequenza di indici
-    // chiusa da $FF).
+    // song_length_table (step count per pattern), e song_order (sequenza di
+    // indici chiusa da $FF).
+    const stepDurSec = 60 / appState.bpm / 4;
+    const framesPerStepNtsc = Math.max(1, Math.round(stepDurSec * 60));
+    const framesPerStepPal = Math.max(1, Math.round(stepDurSec * 50));
     const lines = [
       "; Exported from ChipRoll - TIA-native ca65",
       `; BPM: ${appState.bpm}`,
       "; Format per step: ch1 (AUDF, AUDC, AUDV), then ch2 (AUDF, AUDC, AUDV).",
-      "; AUDV=0 marks a silent step. Patterns may have different step counts.",
+      "; AUDV=$00 marks a silent step. AUDV bit 7 ($80) flags a new onset",
+      "; (player should articulate by writing AUDV=0 for one frame, then the",
+      "; volume from the low nibble). Continuation steps emit $0F (no bit 7).",
+      "; Patterns may have different step counts.",
+      "",
+      `SONG_BPM = ${appState.bpm}`,
+      `SONG_FRAMES_PER_STEP_NTSC = ${framesPerStepNtsc}   ; 60 Hz playback`,
+      `SONG_FRAMES_PER_STEP_PAL  = ${framesPerStepPal}   ; 50 Hz playback`,
       "",
     ];
 
@@ -3321,7 +3339,9 @@
           if (entry) {
             const audf = entry.registro ?? 0;
             const audc = entry.audc ?? 0;
-            bytes.push(audf, audc, 15);
+            // Bit 7 = "new onset" flag. Continuation (drag/MIDI sustain) clears it.
+            const audv = entry.isContinuation === true ? 0x0F : 0x8F;
+            bytes.push(audf, audc, audv);
           } else {
             bytes.push(0, 0, 0);
           }
