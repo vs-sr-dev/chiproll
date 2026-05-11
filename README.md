@@ -20,6 +20,12 @@ It's not trying to replace anything. It's trying to be the path of least resista
 - Frequency engine with chip-accurate register values and per-note intonation feedback in cents (green / yellow / red).
 - Mute / Solo per channel, collapse lanes for focus.
 
+### Patterns / Song
+- Build a piece as a sequence of patterns (`P1`, `P2`, ...). The pattern rack under the transport lets you create (`+`), rename (double-click), delete (`×`), and duplicate (`Ctrl+D`) patterns. Each pattern keeps its own step count and its own TIA timbres.
+- The **song lane** below the rack chains patterns into a song. Drag from rack to song to add; drag within the song to reorder; `×` on an entry removes a single instance without touching the rack.
+- The transport has a **Pattern / Song** toggle. Pattern mode loops the pattern you're editing; Song mode plays the full chain end-to-end. Loop wraps the song from the last pattern back to the first.
+- Pattern boundaries act as implicit note-offs — a held note never sustains across patterns.
+
 ### Note input
 - **Click** an empty cell to insert; click a filled cell to remove.
 - **Horizontal drag on empty** — fill consecutive cells with the same note as a single sustained voice.
@@ -43,11 +49,17 @@ It's not trying to replace anything. It's trying to be the path of least resista
 - **ca65 assembly** — run-length-encoded with named note constants. Long sustained notes collapse into single entries.
 - **Generic JSON** — full session snapshot, including actual chip frequencies and cents offsets for every step.
 
-## Roadmap
+### Session
+- **Save** / **Load** to a local JSON file (`Ctrl+S` / `Ctrl+O`). Round-trips everything: chip choice, BPM, patterns, song, transport mode, edit position.
+- Load asks for confirmation only if the current session already has notes.
 
-### Before public listing (itch.io)
-- **Patterns + Pattern/Song transport mode** — multiple sections of up to 32 steps each (the current per-pattern cap stays), chained on a song timeline FL-Studio-style. Finished patterns collapse to a song-level rack but stay accessible and reproducible. The Play button and Spacebar toggle between **Pattern mode** (just the section currently being edited) and **Song mode** (the full chain). The Loop button continues to work in either mode.
-- **Session save / load** (JSON round-trip), pattern-aware from the start.
+### Keyboard shortcuts
+- `Space` — Play / Stop
+- `[` / `]` — Previous / next pattern in the rack (wraps)
+- `Ctrl+S` / `Ctrl+O` — Save / Load session
+- `Ctrl+D` — Duplicate current pattern
+
+## Roadmap
 
 ### Completing the export cycle
 - **TIA-native ca65 export** — `.byte AUDF, AUDC, AUDV` triplets.
