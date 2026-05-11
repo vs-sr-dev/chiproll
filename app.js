@@ -1,6 +1,9 @@
 (function buildChipRollApp() {
   const root = document.getElementById("piano-roll-root");
   const patternRackRoot = document.getElementById("pattern-rack");
+  const songLaneRoot = document.getElementById("song-lane");
+  const SONG_DRAG_RACK_MIME = "application/x-chiproll-rack-pattern";
+  const SONG_DRAG_REORDER_MIME = "application/x-chiproll-song-index";
   const chipSelect = document.getElementById("chip-select");
   const heroTitle = document.getElementById("hero-title");
   const heroCopy = document.getElementById("hero-copy");
@@ -197,6 +200,15 @@
       pill.setAttribute("role", "tab");
       pill.setAttribute("aria-selected", String(isActive));
       pill.dataset.patternId = patternId;
+      pill.draggable = true;
+      pill.addEventListener("dragstart", (event) => {
+        event.dataTransfer.effectAllowed = "copy";
+        event.dataTransfer.setData(SONG_DRAG_RACK_MIME, patternId);
+        pill.classList.add("dragging");
+      });
+      pill.addEventListener("dragend", () => {
+        pill.classList.remove("dragging");
+      });
 
       const idSpan = document.createElement("span");
       idSpan.className = "pattern-pill-id";
@@ -280,6 +292,200 @@
       input.select();
     });
     return input;
+  }
+
+  function renderSongLane() {
+    songLaneRoot.innerHTML = "";
+
+    const label = document.createElement("span");
+    label.className = "song-lane-label";
+    label.textContent = "Song";
+    songLaneRoot.appendChild(label);
+
+    if (appState.song.length === 0) {
+      const empty = document.createElement("span");
+      empty.className = "song-lane-empty";
+      empty.textContent = "Drag patterns here to build the song";
+      songLaneRoot.appendChild(empty);
+    }
+
+    for (let i = 0; i < appState.song.length; i += 1) {
+      songLaneRoot.appendChild(renderSongSlot(i));
+    }
+
+    songLaneRoot.appendChild(renderSongTail());
+  }
+
+  function renderSongSlot(index) {
+    const patternId = appState.song[index];
+    const pattern = appState.patterns[patternId];
+
+    const slot = document.createElement("span");
+    slot.className = "song-lane-slot";
+    slot.dataset.songIndex = String(index);
+
+    const indicator = document.createElement("span");
+    indicator.className = "song-drop-indicator";
+    slot.appendChild(indicator);
+
+    const pill = document.createElement("span");
+    pill.className = "song-pill";
+    pill.setAttribute("role", "listitem");
+    pill.draggable = true;
+    pill.dataset.songIndex = String(index);
+
+    const idSpan = document.createElement("span");
+    idSpan.className = "song-pill-id";
+    idSpan.textContent = patternId;
+    pill.appendChild(idSpan);
+
+    if (pattern && pattern.label) {
+      const labelSpan = document.createElement("span");
+      labelSpan.className = "pattern-pill-label";
+      labelSpan.textContent = pattern.label;
+      pill.appendChild(labelSpan);
+    }
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "song-pill-delete";
+    deleteButton.setAttribute("aria-label", `Remove ${patternId} at position ${index + 1}`);
+    deleteButton.textContent = "×";
+    deleteButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      removeSongEntryAt(index);
+    });
+    deleteButton.addEventListener("mousedown", (event) => {
+      // Evita che il mousedown sulla X faccia partire il drag del pill.
+      event.stopPropagation();
+    });
+    pill.appendChild(deleteButton);
+
+    pill.addEventListener("dragstart", (event) => {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData(SONG_DRAG_REORDER_MIME, String(index));
+      pill.classList.add("dragging");
+    });
+    pill.addEventListener("dragend", () => {
+      pill.classList.remove("dragging");
+    });
+
+    slot.appendChild(pill);
+
+    slot.addEventListener("dragover", (event) => {
+      if (!hasSongPayload(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect = isRackPayload(event) ? "copy" : "move";
+      clearSongDropIndicators();
+      slot.classList.add("drop-before");
+    });
+    slot.addEventListener("dragleave", (event) => {
+      if (event.currentTarget.contains(event.relatedTarget)) {
+        return;
+      }
+      slot.classList.remove("drop-before");
+    });
+    slot.addEventListener("drop", (event) => {
+      if (!hasSongPayload(event)) {
+        return;
+      }
+      event.preventDefault();
+      slot.classList.remove("drop-before");
+      handleSongDrop(event, index);
+    });
+
+    return slot;
+  }
+
+  function renderSongTail() {
+    const tail = document.createElement("span");
+    tail.className = "song-lane-tail";
+
+    const indicator = document.createElement("span");
+    indicator.className = "song-drop-indicator";
+    tail.appendChild(indicator);
+
+    tail.addEventListener("dragover", (event) => {
+      if (!hasSongPayload(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect = isRackPayload(event) ? "copy" : "move";
+      clearSongDropIndicators();
+      tail.classList.add("drop-active");
+    });
+    tail.addEventListener("dragleave", (event) => {
+      if (event.currentTarget.contains(event.relatedTarget)) {
+        return;
+      }
+      tail.classList.remove("drop-active");
+    });
+    tail.addEventListener("drop", (event) => {
+      if (!hasSongPayload(event)) {
+        return;
+      }
+      event.preventDefault();
+      tail.classList.remove("drop-active");
+      handleSongDrop(event, appState.song.length);
+    });
+
+    return tail;
+  }
+
+  function hasSongPayload(event) {
+    const types = Array.from(event.dataTransfer.types || []);
+    return types.includes(SONG_DRAG_RACK_MIME) || types.includes(SONG_DRAG_REORDER_MIME);
+  }
+
+  function isRackPayload(event) {
+    // I browser bloccano getData() in dragover; types resta accessibile, quindi
+    // discriminiamo source via MIME distinta (rack vs song-reorder).
+    return Array.from(event.dataTransfer.types || []).includes(SONG_DRAG_RACK_MIME);
+  }
+
+  function clearSongDropIndicators() {
+    const slots = songLaneRoot.querySelectorAll(".song-lane-slot.drop-before");
+    slots.forEach((s) => s.classList.remove("drop-before"));
+    const tails = songLaneRoot.querySelectorAll(".song-lane-tail.drop-active");
+    tails.forEach((t) => t.classList.remove("drop-active"));
+  }
+
+  function handleSongDrop(event, targetIndex) {
+    const rackPatternId = event.dataTransfer.getData(SONG_DRAG_RACK_MIME);
+    if (rackPatternId) {
+      if (!appState.patterns[rackPatternId]) {
+        return;
+      }
+      appState.song.splice(targetIndex, 0, rackPatternId);
+      render();
+      return;
+    }
+    const reorderRaw = event.dataTransfer.getData(SONG_DRAG_REORDER_MIME);
+    if (reorderRaw === "") {
+      return;
+    }
+    const fromIndex = Number(reorderRaw);
+    if (!Number.isInteger(fromIndex) || fromIndex < 0 || fromIndex >= appState.song.length) {
+      return;
+    }
+    // Drop su se stesso o subito dopo se stesso: no-op.
+    if (targetIndex === fromIndex || targetIndex === fromIndex + 1) {
+      return;
+    }
+    const [moved] = appState.song.splice(fromIndex, 1);
+    const adjustedTarget = targetIndex > fromIndex ? targetIndex - 1 : targetIndex;
+    appState.song.splice(adjustedTarget, 0, moved);
+    render();
+  }
+
+  function removeSongEntryAt(index) {
+    if (index < 0 || index >= appState.song.length) {
+      return;
+    }
+    appState.song.splice(index, 1);
+    render();
   }
 
   function switchPattern(id) {
@@ -484,6 +690,7 @@
     stepCountSelect.value = String(currentStepCount());
 
     renderPatternRack();
+    renderSongLane();
 
     root.innerHTML = "";
     updateHeaderCopy();
