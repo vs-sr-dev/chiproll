@@ -3194,7 +3194,12 @@
     // ognuno terminato da $00, piu' un descriptor con 4 .word puntatori.
     // Pattern boundary = implicit note-off (lo stream termina, non sustaina
     // cross-pattern). Le tabelle song mappano descriptor + step count e
-    // l'ordine di playback (chiuso da $FF).
+    // l'ordine di playback (chiuso da $FF). Header emette SONG_BPM e
+    // SONG_FRAMES_PER_STEP_{NTSC,PAL} cosi' il player puo' derivare il
+    // tempo dal BPM della composizione senza configurazione.
+    const stepDurSec = 60 / appState.bpm / 4;
+    const framesPerStepNtsc = Math.max(1, Math.round(stepDurSec * 60));
+    const framesPerStepPal = Math.max(1, Math.round(stepDurSec * 50));
     const lines = [
       "; Exported from ChipRoll - NES ca65 (song-aware)",
       `; BPM: ${appState.bpm}`,
@@ -3202,6 +3207,10 @@
       "; Each pattern has 4 streams (pulse1, pulse2, triangle, noise) and a",
       "; descriptor of 4 .word entries. song_pattern_table indexes descriptors,",
       "; song_order ends with $FF.",
+      "",
+      `SONG_BPM = ${appState.bpm}`,
+      `SONG_FRAMES_PER_STEP_NTSC = ${framesPerStepNtsc}   ; 60 Hz playback`,
+      `SONG_FRAMES_PER_STEP_PAL  = ${framesPerStepPal}   ; 50 Hz playback`,
       "",
     ];
 
@@ -3389,6 +3398,9 @@
     // 64 kHz su tutti i canali. Player tipico: scrive AUDCTL=$00 a $D208
     // una volta init, poi stream pattern data a $D200..$D207 ogni frame.
     const VOLUME_FULL = 0x0F;
+    const stepDurSec = 60 / appState.bpm / 4;
+    const framesPerStepNtsc = Math.max(1, Math.round(stepDurSec * 60));
+    const framesPerStepPal = Math.max(1, Math.round(stepDurSec * 50));
     const lines = [
       "; Exported from ChipRoll - POKEY-native ca65 (song-aware)",
       `; BPM: ${appState.bpm}`,
@@ -3396,6 +3408,10 @@
       "; Format per step: 4 channels x (AUDF, AUDC) = 8 bytes.",
       "; AUDC byte: high nibble = distortion ($A=pure $E=buzz $8=noise),",
       "; low nibble = volume (0-15, $F = full). AUDC=$00 = silent step.",
+      "",
+      `SONG_BPM = ${appState.bpm}`,
+      `SONG_FRAMES_PER_STEP_NTSC = ${framesPerStepNtsc}   ; 60 Hz playback`,
+      `SONG_FRAMES_PER_STEP_PAL  = ${framesPerStepPal}   ; 50 Hz playback`,
       "",
     ];
 
