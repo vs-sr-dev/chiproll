@@ -27,3 +27,11 @@ yarn-error.log*
 # Working foundation — internal briefs, not part of the public source tree.
 Chiproll.md
 chiproll_midi_import_brief_ita.md
+
+# Validation build artifacts — sources are committed, output binaries aren't.
+validation/*/build/
+validation/*/*.bin
+validation/*/*.nes
+validation/*/*.a78
+validation/*/*.lst
+validation/*/*.sym
