@@ -45,8 +45,9 @@ It's not trying to replace anything. It's trying to be the path of least resista
 
 ## Roadmap
 
-### Coming next
-- **Session save / load** (JSON round-trip). The most-felt gap right now.
+### Before public listing (itch.io)
+- **Patterns + Pattern/Song transport mode** — multiple sections of up to 32 steps each (the current per-pattern cap stays), chained on a song timeline FL-Studio-style. Finished patterns collapse to a song-level rack but stay accessible and reproducible. The Play button and Spacebar toggle between **Pattern mode** (just the section currently being edited) and **Song mode** (the full chain). The Loop button continues to work in either mode.
+- **Session save / load** (JSON round-trip), pattern-aware from the start.
 
 ### Completing the export cycle
 - **TIA-native ca65 export** — `.byte AUDF, AUDC, AUDV` triplets.
@@ -57,7 +58,6 @@ It's not trying to replace anything. It's trying to be the path of least resista
 - **MusicXML import** — alternative to MIDI for those working from notation; already specified in the original brief (Step 8).
 
 ### Nice to have
-- Multiple patterns + a minimal song editor.
 - Undo / redo.
 - MIDI export — round-trip back to DAWs for anyone who'd rather finish a sketch outside ChipRoll.
 
