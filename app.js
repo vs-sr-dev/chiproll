@@ -17,7 +17,11 @@
   const stepCountSelect = document.getElementById("step-count-select");
   const modePatternButton = document.getElementById("mode-pattern-button");
   const modeSongButton = document.getElementById("mode-song-button");
+  const saveButton = document.getElementById("save-button");
+  const loadButton = document.getElementById("load-button");
+  const loadFileInput = document.getElementById("load-file-input");
   const importButton = document.getElementById("import-button");
+  const SESSION_FILE_VERSION = 1;
   const importOverlay = document.getElementById("import-overlay");
   const importClose = document.getElementById("import-close");
   const importDropZone = document.getElementById("import-drop-zone");
@@ -595,6 +599,12 @@
 
   modePatternButton.addEventListener("click", () => setTransportMode("pattern"));
   modeSongButton.addEventListener("click", () => setTransportMode("song"));
+
+  saveButton.addEventListener("click", handleSaveSession);
+  loadButton.addEventListener("click", () => loadFileInput.click());
+  loadFileInput.addEventListener("change", (event) => {
+    void handleLoadFileSelected(event);
+  });
 
   importButton.addEventListener("click", openImportPanel);
   importClose.addEventListener("click", closeImportPanel);
@@ -1967,6 +1977,178 @@
       pattern.channels[channelId].notes.clear();
     }
 
+    render();
+  }
+
+  function isSessionDirty() {
+    for (const pattern of Object.values(appState.patterns)) {
+      for (const channelData of Object.values(pattern.channels)) {
+        if (channelData.notes.size > 0) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function serializeSession() {
+    const patternsOut = {};
+    for (const [id, pattern] of Object.entries(appState.patterns)) {
+      const channelsOut = {};
+      for (const [chId, chData] of Object.entries(pattern.channels)) {
+        const channelOut = { notes: Array.from(chData.notes.values()) };
+        if (chData.audc !== undefined) {
+          channelOut.audc = chData.audc;
+        }
+        channelsOut[chId] = channelOut;
+      }
+      patternsOut[id] = {
+        id: pattern.id,
+        label: pattern.label,
+        stepCount: pattern.stepCount,
+        channels: channelsOut,
+      };
+    }
+    return {
+      version: SESSION_FILE_VERSION,
+      savedAt: new Date().toISOString(),
+      chip: appState.activeChip,
+      bpm: appState.bpm,
+      loop: appState.loop,
+      channelGlobals: appState.channelGlobals,
+      patterns: patternsOut,
+      patternOrder: appState.patternOrder,
+      song: appState.song,
+      currentPatternId: appState.currentPatternId,
+      transportMode: appState.transportMode,
+    };
+  }
+
+  function handleSaveSession() {
+    const session = serializeSession();
+    const json = JSON.stringify(session, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = buildSessionFilename();
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function buildSessionFilename() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    return `chiproll-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+  }
+
+  async function handleLoadFileSelected(event) {
+    const file = event.target.files && event.target.files[0];
+    // Reset value subito: senza questo, riselezionare lo stesso file non ritriggera change.
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    if (isSessionDirty()) {
+      const confirmed = window.confirm("Discard current session and load file?");
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    let data;
+    try {
+      const text = await file.text();
+      data = JSON.parse(text);
+    } catch (error) {
+      console.error("[ChipRoll] Load failed: invalid JSON", error);
+      window.alert("Load failed: invalid JSON file.");
+      return;
+    }
+
+    if (data == null || typeof data !== "object" || data.version !== SESSION_FILE_VERSION) {
+      window.alert(`Load failed: unsupported version (expected ${SESSION_FILE_VERSION}).`);
+      return;
+    }
+
+    try {
+      applyLoadedSession(data);
+    } catch (error) {
+      console.error("[ChipRoll] Load failed: corrupt session data", error);
+      window.alert("Load failed: corrupt session data.");
+    }
+  }
+
+  function applyLoadedSession(data) {
+    stopPlayback();
+
+    appState.activeChip = data.chip;
+    appState.bpm = data.bpm;
+    appState.loop = Boolean(data.loop);
+    appState.channelGlobals = data.channelGlobals;
+    appState.patternOrder = data.patternOrder.slice();
+    appState.song = data.song.slice();
+    appState.currentPatternId = data.currentPatternId;
+    appState.transportMode = data.transportMode === "song" ? "song" : "pattern";
+
+    // Ricostruisce tiaRowsByAudc: deriva dal chip, non e' nel JSON.
+    if (appState.activeChip === "TIA") {
+      appState.tiaRowsByAudc = {
+        12: buildTiaRows(12),
+        1: buildTiaRows(1),
+        8: buildTiaRows(8),
+      };
+    } else {
+      appState.tiaRowsByAudc = {};
+    }
+
+    // Ricostruisce patterns con Map notes a partire dagli array.
+    appState.patterns = {};
+    for (const [id, pat] of Object.entries(data.patterns)) {
+      const channels = {};
+      for (const [chId, chData] of Object.entries(pat.channels)) {
+        const notesMap = new Map();
+        for (const entry of chData.notes) {
+          notesMap.set(`${entry.rowId}:${entry.step}`, entry);
+        }
+        const out = { notes: notesMap };
+        if (chData.audc !== undefined) {
+          out.audc = chData.audc;
+        }
+        channels[chId] = out;
+      }
+      appState.patterns[id] = {
+        id: pat.id,
+        label: pat.label ?? null,
+        stepCount: pat.stepCount,
+        channels,
+      };
+    }
+
+    // patternIdCounter = max numero P presente nei pattern (evita collisioni).
+    let maxN = 0;
+    for (const id of Object.keys(appState.patterns)) {
+      const m = id.match(/^P(\d+)$/);
+      if (m) {
+        const n = Number(m[1]);
+        if (n > maxN) maxN = n;
+      }
+    }
+    patternIdCounter = maxN;
+
+    editingPatternLabelId = null;
+
+    // Sync controlli UI con lo stato caricato.
+    chipSelect.value = appState.activeChip;
+    bpmInput.value = String(appState.bpm);
+    stepCountSelect.value = String(currentStepCount());
+    updateHeaderCopy();
+    updateLoopButtonVisual();
+    updateTransportModeVisual();
+    updateTransportState();
     render();
   }
 
