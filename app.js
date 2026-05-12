@@ -29,6 +29,7 @@
   const importStatus = document.getElementById("import-status");
   const importControls = document.getElementById("import-controls");
   const voiceStrategySelect = document.getElementById("voice-strategy-select");
+  const importPatternLengthSelect = document.getElementById("import-pattern-length-select");
   const importSummary = document.getElementById("import-summary");
   const importTracksList = document.getElementById("import-tracks");
   const importUnassignedList = document.getElementById("import-unassigned");
@@ -44,6 +45,7 @@
   const { parseMidi } = window.MidiParser;
   const { quantizeTrack } = window.Quantizer;
   const { reduceTrack } = window.VoiceReducer;
+  const { splitNotesIntoChunks } = window.NoteSplitter;
   const { PERSONALITIES, getGmFamily } = window.GmMapping;
   const { assignTracks } = window.TrackAssigner;
   const VOICE_STRATEGIES = ["highest", "lowest", "last"];
@@ -630,11 +632,14 @@
 
     render();
   }
+  const DEFAULT_IMPORT_PATTERN_LENGTH = 32;
+  const VALID_IMPORT_PATTERN_LENGTHS = new Set([8, 16, 32]);
   const importSession = {
     parsedSong: null,
     result: null,
     overrides: new Map(),
     voiceStrategy: "highest",
+    patternLength: DEFAULT_IMPORT_PATTERN_LENGTH,
   };
   let audioContext = null;
   let cachedNoiseBuffer = null;
@@ -702,6 +707,9 @@
   });
   voiceStrategySelect.addEventListener("change", (event) => {
     handleVoiceStrategyChange(event.target.value);
+  });
+  importPatternLengthSelect.addEventListener("change", (event) => {
+    handleImportPatternLengthChange(event.target.value);
   });
 
   chipSelect.addEventListener("change", (event) => {
@@ -781,6 +789,7 @@
     result: importSession.result,
     overrides: Object.fromEntries(importSession.overrides),
     voiceStrategy: importSession.voiceStrategy,
+    patternLength: importSession.patternLength,
   });
 
   function render() {
@@ -1881,8 +1890,8 @@
     return null;
   }
 
-  function clearChannelStep(channelId, step) {
-    const data = channelData(channelId);
+  function clearChannelStep(channelId, step, patternId = appState.currentPatternId) {
+    const data = channelData(channelId, patternId);
 
     if (!data) {
       return;
@@ -2406,7 +2415,9 @@
     importSession.result = null;
     importSession.overrides.clear();
     importSession.voiceStrategy = "highest";
+    importSession.patternLength = DEFAULT_IMPORT_PATTERN_LENGTH;
     voiceStrategySelect.value = "highest";
+    importPatternLengthSelect.value = String(DEFAULT_IMPORT_PATTERN_LENGTH);
     importTracksList.innerHTML = "";
     importUnassignedList.innerHTML = "";
     importSummary.textContent = "";
@@ -2647,6 +2658,15 @@
     runAndRenderPipeline();
   }
 
+  function handleImportPatternLengthChange(value) {
+    const parsed = Number.parseInt(value, 10);
+    if (!VALID_IMPORT_PATTERN_LENGTHS.has(parsed)) {
+      importPatternLengthSelect.value = String(importSession.patternLength);
+      return;
+    }
+    importSession.patternLength = parsed;
+  }
+
   function handleConfirmImport() {
     if (!importSession.result) {
       return;
@@ -2654,7 +2674,7 @@
 
     if (hasExistingPianoRollNotes()) {
       const ok = window.confirm(
-        "The piano roll already contains notes. Importing will overwrite them. Proceed?",
+        "Importing will replace all existing patterns and the song. Proceed?",
       );
 
       if (!ok) {
@@ -2678,6 +2698,7 @@
       bpm: Math.round(importSession.parsedSong.bpm),
       ppq: importSession.parsedSong.ppq,
       voiceStrategy: importSession.voiceStrategy,
+      patternLength: importSession.patternLength,
       finalAssignments,
       unassigned: importSession.result.unassigned,
     };
@@ -2703,29 +2724,64 @@
     appState.bpm = newBpm;
     bpmInput.value = String(newBpm);
 
-    // Switch chip se diverso (resetta tutto lo stato dei canali);
-    // altrimenti svuota le note di ogni canale in-place per "sovrascrivere".
+    const chunkSize = VALID_IMPORT_PATTERN_LENGTHS.has(payload.patternLength)
+      ? payload.patternLength
+      : DEFAULT_IMPORT_PATTERN_LENGTH;
+
+    // Replace totale: cambia chip (se serve) e wipe completo di pattern/song.
+    // resetChannelsForChip ricostruisce un singolo P1 vuoto a stepCount 16; lo
+    // sostituiamo subito sotto con N pattern a stepCount = chunkSize.
     if (payload.chip && payload.chip !== appState.activeChip) {
       appState.activeChip = payload.chip;
       chipSelect.value = payload.chip;
-      resetChannelsForChip(payload.chip);
-    } else {
-      // Import nello stesso chip: svuoto le note del pattern in edit
-      // (gli altri pattern restano intatti, coerente con "import sovrascrive
-      // il piano roll corrente" ma scoped al pattern).
-      const pattern = currentPattern();
-      for (const id of Object.keys(pattern.channels)) {
-        pattern.channels[id].notes.clear();
+    }
+    resetChannelsForChip(appState.activeChip);
+
+    // Step massimo (esclusivo) raggiunto da una qualunque nota assegnata: determina
+    // quanti pattern servono. Note non assegnate non contano.
+    let maxEnd = 0;
+    for (const assignment of payload.finalAssignments) {
+      for (const note of assignment.track?.notes || []) {
+        if (!Number.isInteger(note.step) || note.step < 0) continue;
+        const dur = Math.max(1, Number.isInteger(note.duration) ? note.duration : 1);
+        maxEnd = Math.max(maxEnd, note.step + dur);
       }
     }
+    const numChunks = Math.max(1, Math.ceil(maxEnd / chunkSize));
+
+    // Wipe esplicito dei pattern creati da resetChannelsForChip e ricostruzione.
+    appState.patterns = {};
+    appState.patternOrder = [];
+    appState.song = [];
+    patternIdCounter = 0;
+
+    const newPatternIds = [];
+    for (let i = 0; i < numChunks; i += 1) {
+      const id = nextPatternId();
+      appState.patterns[id] = createEmptyPattern(id, appState.activeChip, chunkSize);
+      appState.patternOrder.push(id);
+      appState.song.push(id);
+      newPatternIds.push(id);
+    }
+    appState.currentPatternId = newPatternIds[0];
 
     const warnings = [];
     let totalNotesWritten = 0;
 
     for (const assignment of payload.finalAssignments) {
-      const result = writeAssignmentToChannel(assignment);
-      warnings.push(...result.warnings);
-      totalNotesWritten += result.notesWritten;
+      const notes = assignment.track?.notes || [];
+      const chunked = splitNotesIntoChunks(notes, chunkSize);
+
+      for (let chunkIdx = 0; chunkIdx < chunked.length; chunkIdx += 1) {
+        const segments = chunked[chunkIdx];
+        if (segments.length === 0) continue;
+        const patternId = newPatternIds[chunkIdx];
+        if (!patternId) continue; // safety: splitter ha emesso piu' chunk di quanti previsti
+
+        const result = writeAssignmentSegmentsToPattern(assignment, patternId, segments);
+        warnings.push(...result.warnings);
+        totalNotesWritten += result.notesWritten;
+      }
     }
 
     for (const item of payload.unassigned || []) {
@@ -2738,7 +2794,8 @@
     console.log("[ChipRoll Import] Import applied.", {
       chip: appState.activeChip,
       bpm: appState.bpm,
-      stepCount: currentStepCount(),
+      patternLength: chunkSize,
+      patternsCreated: numChunks,
       notesWritten: totalNotesWritten,
       warnings: warnings.length,
     });
@@ -2757,19 +2814,21 @@
     return { warnings, notesWritten: totalNotesWritten };
   }
 
-  function writeAssignmentToChannel(assignment) {
+  function writeAssignmentSegmentsToPattern(assignment, patternId, segments) {
     const warnings = [];
     let notesWritten = 0;
-    const { track, channel: channelId, personality } = assignment;
+    const { channel: channelId, personality } = assignment;
 
-    const data = channelData(channelId);
+    const data = channelData(channelId, patternId);
 
     if (!data) {
       warnings.push(`Channel ${channelId} not available on the ${appState.activeChip} chip. Skipped.`);
       return { warnings, notesWritten };
     }
 
-    // For TIA, AUDC depends on the chosen personality: Pure Tone / Buzz / Noise.
+    // TIA AUDC e' per-pattern: va settato su OGNI pattern in cui l'assignment viene
+    // scritto, altrimenti i pattern successivi suonano col timbro default. POKEY non
+    // viene toccato qui (default $A0 dal pattern create), parita' col comportamento single-pattern.
     if (appState.activeChip === "TIA") {
       data.audc = personalityToAudc(personality);
     }
@@ -2781,51 +2840,29 @@
       return { warnings, notesWritten };
     }
 
-    let droppedOutOfGrid = 0;
-    let clippedAtBoundary = 0;
-
-    for (const note of track.notes || []) {
-      if (!Number.isInteger(note.step) || note.step < 0) {
-        continue;
-      }
-
-      if (note.step >= currentStepCount()) {
-        droppedOutOfGrid += 1;
-        continue;
-      }
-
-      let duration = Math.max(1, Number.isInteger(note.duration) ? note.duration : 1);
-
-      if (note.step + duration > currentStepCount()) {
-        duration = currentStepCount() - note.step;
-        clippedAtBoundary += 1;
-      }
-
-      const row = pickRowForNote(channelDef, note);
+    for (const segment of segments) {
+      const row = pickRowForNote(channelDef, segment);
 
       if (!row) {
-        warnings.push(`Pitch ${note.pitch} on ${channelDef.name}: no row available.`);
+        warnings.push(`Pitch ${segment.pitch} on ${channelDef.name}: no row available.`);
         continue;
       }
 
-      notesWritten += insertImportedRun(channelDef, data, row, note.step, duration);
-    }
-
-    if (droppedOutOfGrid > 0) {
-      warnings.push(
-        `${channelDef.name}: ${droppedOutOfGrid} note${droppedOutOfGrid === 1 ? "" : "s"} past step ${currentStepCount()} dropped. ` +
-          `Extend the grid (8/16/32) or import a different section.`,
+      notesWritten += insertImportedRun(
+        channelDef,
+        data,
+        row,
+        segment.step,
+        segment.duration,
+        patternId,
+        segment.isContinuation === true,
       );
-    }
-
-    if (clippedAtBoundary > 0) {
-      warnings.push(`${channelDef.name}: ${clippedAtBoundary} note${clippedAtBoundary === 1 ? "" : "s"} clipped at the grid boundary.`);
     }
 
     return { warnings, notesWritten };
   }
 
-  function insertImportedRun(channel, data, row, startStep, duration) {
+  function insertImportedRun(channel, data, row, startStep, duration, patternId, startIsContinuation = false) {
     let inserted = 0;
 
     for (let i = 0; i < duration; i += 1) {
@@ -2837,10 +2874,10 @@
       }
 
       // Canale monofonico per step: pulisce note di altre righe sullo stesso step.
-      clearChannelStep(channel.id, step);
+      clearChannelStep(channel.id, step, patternId);
 
       const entry = createEntryForCell(channel, row, step);
-      entry.isContinuation = i > 0;
+      entry.isContinuation = startIsContinuation || i > 0;
       data.notes.set(key, entry);
       inserted += 1;
     }
@@ -2944,15 +2981,13 @@
   }
 
   function hasExistingPianoRollNotes() {
-    // Controllo solo il pattern in edit: il pannello import sovrascrive
-    // il pattern corrente, non gli altri.
-    const pattern = currentPattern();
-    if (!pattern) {
-      return false;
-    }
-    for (const channelId of Object.keys(pattern.channels)) {
-      if (pattern.channels[channelId].notes.size > 0) {
-        return true;
+    // Import sostituisce TUTTA la song (pattern + sequence), non solo il pattern
+    // corrente: controlliamo qualunque pattern abbia note in qualunque canale.
+    for (const pattern of Object.values(appState.patterns)) {
+      for (const channelId of Object.keys(pattern.channels)) {
+        if (pattern.channels[channelId].notes.size > 0) {
+          return true;
+        }
       }
     }
     return false;

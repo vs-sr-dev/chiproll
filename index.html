@@ -103,6 +103,14 @@
               <option value="last">Last wins</option>
             </select>
           </label>
+          <label class="meta-control" for="import-pattern-length-select">
+            <span class="meta-control-label">Pattern length</span>
+            <select id="import-pattern-length-select" class="meta-select">
+              <option value="8">8 steps</option>
+              <option value="16">16 steps</option>
+              <option value="32" selected>32 steps</option>
+            </select>
+          </label>
           <p id="import-summary" class="import-summary"></p>
         </div>
 
@@ -121,6 +129,7 @@
     <script src="./gmMapping.js"></script>
     <script src="./quantizer.js"></script>
     <script src="./voiceReducer.js"></script>
+    <script src="./noteSplitter.js"></script>
     <script src="./trackAssigner.js"></script>
     <script src="./midiParser.js"></script>
     <script src="./app.js"></script>
