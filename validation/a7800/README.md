@@ -8,9 +8,14 @@ ProSystem core). The display is a solid blue background — this is an audio
 ## What it shows
 
 - The export format `buildPokeyCa65Assembly` produces is real
-  hardware-ready: per-step 8-byte streams
+  hardware-ready: per-step 9-byte streams — 8 bytes
   `(AUDF1, AUDC1, AUDF2, AUDC2, AUDF3, AUDC3, AUDF4, AUDC4)` flow straight
-  into POKEY registers at `$0450..$0457`.
+  into POKEY registers at `$0450..$0457`, followed by a 1-byte onset
+  bitmask (bit *n* = "new onset" for channel *n+1*, cleared on
+  drag-fill / MIDI-sustain continuations) so the player can articulate
+  adjacent same-pitch notes by writing `AUDC=$00` for one frame on
+  onsets — POKEY has no envelope hardware, same trick the TIA player
+  uses with AUDV bit 7.
 - All four POKEY channels work end-to-end with `AUDCTL = $00` (64 kHz
   clock, no joined-16-bit, no filters — ChipRoll's POKEY v1 scope).
 - The song tables (`pokey_song_pattern_table`, `pokey_song_length_table`,
@@ -110,9 +115,10 @@ player — please file it.
   Atari recommended startup (lock 7800 mode, clear MARIA control,
   initialise POKEY at $0450), then a 12-zone MARIA display list with
   DLI on the last zone → NMI handler ticks the song one step every
-  `SONG_FRAMES_PER_STEP_NTSC` frames. All eight POKEY register writes
-  per step come straight from `(MusicPtrLo),Y` so the export's byte
-  layout maps 1-to-1 onto the hardware.
+  `SONG_FRAMES_PER_STEP_NTSC` frames. Eight POKEY register writes per
+  step come straight from `(MusicPtrLo),Y` so the export's byte layout
+  maps 1-to-1 onto the hardware; the 9th byte (onset bitmask) gates a
+  one-frame `AUDC=$00` re-trigger on each new onset.
 - `src/song.asm` — placeholder ChipRoll-shaped data; replace with your
   own export (see "Re-export from ChipRoll" above).
 - `build.bat` — wraps `dasm` + `7800header`. Override `DASM` and/or

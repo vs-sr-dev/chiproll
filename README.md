@@ -40,9 +40,11 @@ It's not trying to replace anything. It's trying to be the path of least resista
 
 ### Import (MIDI)
 - Drop a `.mid` file into the import overlay.
-- Pipeline: polyphony reduction (top melody / bottom bass / last wins) → quantization → General MIDI → chip personality mapping (Soft / Standard / Sharp square, Smooth bass, Noise/Percussion) → channel assignment with bass-detection by program *and* by median pitch.
+- Pipeline: polyphony reduction (top melody / bottom bass / last wins) → grid detection (mode-of-deltas + secondary-structure refinement) → quantization → General MIDI → chip personality mapping (Soft / Standard / Sharp square, Smooth bass, Noise/Percussion) → channel assignment with bass-detection by program *and* by median pitch.
+- **Auto multi-pattern**: MIDIs longer than one pattern are split automatically. Pick the target pattern length (8 / 16 / 32 steps) in the import overlay; the importer creates as many patterns as needed and chains them into the song. Notes that cross a pattern boundary are flagged as continuation in the next pattern so playback sustains across the seam.
+- **Auto BPM stretch**: when the MIDI's natural grid is not a clean multiple of sixteenths (quintuplet feel, half-beat sub-divisions, etc.), the BPM is rescaled so the ChipRoll grid lines up with the actual onsets — real-time tempo is preserved. The original / new BPM is shown in the import summary.
 - Per-track override of personality and channel before confirm.
-- BPM and PPQ from the MIDI carry over.
+- Triplet feels on even meters (4/4 with embedded triplet groups) are **not yet aligned** — they fall on the nearest step and may swing slightly. Same for sparse 32nd-note ornaments. Both are on the roadmap.
 
 ### Export
 All NES and TIA exports are **song-aware**: they emit every pattern in the rack plus song tables that describe the playback order. JSON is a full session snapshot.
@@ -72,6 +74,10 @@ All NES and TIA exports are **song-aware**: they emit every pattern in the rack 
 - **POKEY v2** — joined 16-bit channels (`AUDCTL` bits 3/4) and alternative clocks (15 kHz for bass, 1.79 MHz for CH1/CH3 ultra-high pitch). Unlocks proper bass below B2 and pitch precision at the top of the range.
 - **MusicXML import** — alternative to MIDI for those working from notation; already specified in the original brief (Step 8).
 
+### Import refinements
+- **Triplet groups on even meters** — currently the grid detector aligns the dominant subdivision but doesn't yet model triplet *colour* (e.g. an 8th-triplet group inside a 4/4 phrase). Such groups fall on the nearest even step and may swing slightly.
+- **Sparse 32nd-note ornaments** — rare ornaments below the dominant grid are treated as outliers and snap to the nearest step.
+
 ### Nice to have
 - **Transpose Oct+ / Oct−** per channel (later: per semitone), beside Mute / Solo, with a warning when notes would fall outside the channel's range and get clipped.
 - Undo / redo.
@@ -88,6 +94,8 @@ quantizer.js           ticks → grid steps
 voiceReducer.js        polyphony → monophonic stream
 gmMapping.js           GM program → chip personality
 trackAssigner.js       MIDI tracks → chip channels
+noteSplitter.js        absolute steps → per-pattern segments with boundary continuation
+importTiming.js        MIDI grid detection + auto BPM stretch
 styles.css             everything visual
 *.test.js              Node tests for the modules
 ```
@@ -100,6 +108,8 @@ node quantizer.test.js
 node voiceReducer.test.js
 node gmMapping.test.js
 node trackAssigner.test.js
+node noteSplitter.test.js
+node importTiming.test.js
 ```
 
 ## Built on
