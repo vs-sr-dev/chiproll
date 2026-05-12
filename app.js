@@ -46,6 +46,7 @@
   const { quantizeTrack } = window.Quantizer;
   const { reduceTrack } = window.VoiceReducer;
   const { splitNotesIntoChunks } = window.NoteSplitter;
+  const { computeImportTimingAdjustment } = window.ImportTiming;
   const { PERSONALITIES, getGmFamily } = window.GmMapping;
   const { assignTracks } = window.TrackAssigner;
   const VOICE_STRATEGIES = ["highest", "lowest", "last"];
@@ -2385,6 +2386,17 @@
       throw new Error(`Unsupported voice strategy: ${voiceStrategy}`);
     }
 
+    // Auto-stretch del BPM: se il MIDI usa una griglia non-16th (es. quintine,
+    // groove non standard), calcolo il GCD degli onset e ricalcolo il BPM in modo
+    // che la velocita' reale resti identica e ogni nota cada su uno step intero.
+    const timing = computeImportTimingAdjustment({
+      ppq: parsedSong.ppq,
+      bpm: parsedSong.bpm,
+      tracks: parsedSong.tracks,
+      bpmMin: BPM_MIN,
+      bpmMax: BPM_MAX,
+    });
+
     // Tag con indice originale per correlare l'output di assignTracks alle tracce iniziali
     // (UI: dropdown override per traccia). Reduce e quantize spread-ano i campi, quindi
     // __sourceIndex sopravvive lungo la pipeline.
@@ -2393,10 +2405,11 @@
     // Reduce in tick domain (preserva la precisione delle sovrapposizioni reali).
     const reduced = tagged.map((track) => reduceTrack(track, voiceStrategy));
 
-    // Quantize dopo reduce: ogni segmento risultante ottiene step/duration coerenti.
-    const quantized = reduced.map((track) => quantizeTrack(track, parsedSong.ppq));
+    // Quantize con la stepsPerBeat scelta dal timing adjustment (default 4 = 16th).
+    const quantized = reduced.map((track) => quantizeTrack(track, parsedSong.ppq, timing.stepsPerBeat));
 
-    return assignTracks(quantized, chip);
+    const assignment = assignTracks(quantized, chip);
+    return { ...assignment, timing };
   }
 
   function openImportPanel() {
@@ -2514,9 +2527,25 @@
     const total = parsedSong.tracks.length;
     const assignedCount = result.assigned.length;
     const unassignedCount = result.unassigned.length;
+    const timing = result.timing || { adjusted: false, bpm: parsedSong.bpm };
+
+    let bpmLabel;
+    if (timing.adjusted) {
+      // Mostriamo entrambi: orig → adjusted. La velocita' reale e' invariata.
+      bpmLabel = `BPM: ${Math.round(timing.originalBpm)} → ${Math.round(timing.bpm * 10) / 10} (auto-stretch to fit grid)`;
+    } else if (timing.warning) {
+      bpmLabel = `BPM: ${Math.round(parsedSong.bpm)} (grid mismatch detected, see console)`;
+    } else {
+      bpmLabel = `BPM: ${Math.round(parsedSong.bpm)}`;
+    }
+
     importSummary.textContent =
       `${total} track${total === 1 ? "" : "s"} detected (${assignedCount} assigned, ${unassignedCount} unassigned). ` +
-      `BPM: ${Math.round(parsedSong.bpm)}, PPQ: ${parsedSong.ppq}.`;
+      `${bpmLabel}, PPQ: ${parsedSong.ppq}.`;
+
+    if (timing.warning) {
+      console.warn("[ChipRoll Import]", timing.warning);
+    }
 
     importTracksList.innerHTML = "";
     if (assignedCount === 0) {
@@ -2693,9 +2722,12 @@
       };
     });
 
+    // Usa il BPM eventualmente auto-stretchato dal timing adjustment (mantiene
+    // velocita' reale invariata anche per MIDI con griglie non-16th).
+    const timing = importSession.result.timing || { bpm: importSession.parsedSong.bpm };
     const payload = {
       chip: appState.activeChip,
-      bpm: Math.round(importSession.parsedSong.bpm),
+      bpm: Math.round(timing.bpm),
       ppq: importSession.parsedSong.ppq,
       voiceStrategy: importSession.voiceStrategy,
       patternLength: importSession.patternLength,
