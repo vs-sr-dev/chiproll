@@ -23,6 +23,10 @@
               <option value="POKEY">Atari POKEY</option>
             </select>
           </label>
+          <label id="midi-device-wrap" class="chip-select-wrap" for="midi-device-select" hidden>
+            <span class="chip-select-label">MIDI in</span>
+            <select id="midi-device-select" class="chip-select"></select>
+          </label>
           <button id="save-button" type="button" class="hero-import" title="Save (Ctrl+S)">Save</button>
           <button id="load-button" type="button" class="hero-import" title="Load (Ctrl+O)">Load</button>
           <input id="load-file-input" type="file" accept=".json,application/json" hidden />
@@ -64,6 +68,7 @@
                 <button id="play-button" class="transport-button" type="button">Play</button>
                 <button id="stop-button" class="transport-button secondary" type="button">Stop</button>
                 <button id="loop-button" class="transport-button secondary" type="button" aria-pressed="false">Loop</button>
+                <button id="countdown-button" class="transport-button secondary" type="button" aria-pressed="false" title="4-beat metronome count-in before Play">Count-in</button>
                 <button id="clear-button" class="transport-button danger" type="button">Clear</button>
               </div>
             </div>

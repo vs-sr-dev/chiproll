@@ -19,6 +19,8 @@ It's not trying to replace anything. It's trying to be the path of least resista
 - Grid: **8 / 16 / 32 steps** per pattern, BPM 40–300, Loop transport.
 - Frequency engine with chip-accurate register values and per-note intonation feedback in cents (green / yellow / red).
 - Mute / Solo per channel, collapse lanes for focus.
+- **Octave / semitone shift** per channel (Oct↑/Oct↓, Tr↑/Tr↓ beside Solo). Chromatic channels (NES Pulse 1/2, Triangle, all POKEY) shift by exact semitones; TIA shifts by row index (Tr) or by closest hz within ±600 cents of a real octave (Oct), with a one-time notice explaining that TIA pitch rows are not equally spaced. Notes that would fall outside the grid prompt a confirm with the count of discarded notes. Acts on the pattern in edit; Noise lanes are excluded.
+- **Count-in** transport toggle — when armed, Play (button or `Space`) is preceded by a 4-beat metronome at the current BPM so you can move your hands to a MIDI controller before recording. First beat is accentuated; Stop cancels the count cleanly. Subsequent loops play without re-counting.
 
 ### Patterns / Song
 - Build a piece as a sequence of patterns (`P1`, `P2`, ...). The pattern rack under the transport lets you create (`+`), rename (double-click), delete (`×`), and duplicate (`Ctrl+D`) patterns. Each pattern keeps its own step count and its own TIA timbres.
@@ -32,6 +34,11 @@ It's not trying to replace anything. It's trying to be the path of least resista
 - **Horizontal drag on filled** — move the entire run.
 - **Vertical drag on filled** — change pitch (move the run to another row, length and position preserved).
 - A 4-pixel movement threshold disambiguates intent so single clicks stay clean.
+- **MIDI controller** (Web MIDI API) — connect a USB controller, pick the input from the hero bar (`MIDI in`), then arm a channel:
+  - **MIDI▶** — live monitor: incoming notes play through the channel's synth as you hold them. Independent of transport, useful for trying out parts.
+  - **MIDI●** — punch-in recording: while transport is playing, incoming notes are written to the channel's grid at the current step. Holding a key extends the note as continuation cells until release. The first key pressed at the very start of the pattern lands exactly on cell 1 (combine with Count-in to give yourself time to move from keyboard to controller).
+  - Strict single-target exclusivity: arming Play or Rec on a different channel clears the previous channel's assignments. The chromatic mapping uses exact MIDI-to-row lookup on NES Pulse / Triangle and POKEY (clamped to range); TIA maps to the closest available pitch row. Noise channels do not accept MIDI.
+  - Device selection persists across sessions; channel assignments are session-volatile and are cleared on chip switch, Load, or Import.
 
 ### Audio
 - Web Audio API. NES Pulse / Triangle / Noise approximated with proper waveforms; TIA Pure Tone / Buzz with square; TIA Noise via random-buffer source.
@@ -79,7 +86,7 @@ All NES and TIA exports are **song-aware**: they emit every pattern in the rack 
 - **Sparse 32nd-note ornaments** — rare ornaments below the dominant grid are treated as outliers and snap to the nearest step.
 
 ### Nice to have
-- **Transpose Oct+ / Oct−** per channel (later: per semitone), beside Mute / Solo, with a warning when notes would fall outside the channel's range and get clipped.
+- **Metronome during playback** — currently Count-in clicks only before transport start; an always-on tick during playback would help when recording over longer passages.
 - Undo / redo.
 - MIDI export — round-trip back to DAWs for anyone who'd rather finish a sketch outside ChipRoll.
 

@@ -724,6 +724,12 @@ body {
   box-shadow: 0 0 0 2px rgba(47, 125, 102, 0.35);
 }
 
+.transport-button.countdown-active {
+  background: linear-gradient(180deg, #d4a04a 0%, #a36f1f 100%);
+  color: #fffaf4;
+  box-shadow: 0 0 0 2px rgba(163, 111, 31, 0.35);
+}
+
 .roll-layout {
   overflow: auto;
   border-radius: 18px;
@@ -822,6 +828,31 @@ body {
 .collapse-button {
   min-width: 42px;
   padding: 8px 0;
+}
+
+.shift-button {
+  padding: 8px 10px;
+  min-width: 52px;
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+}
+
+.midi-button {
+  padding: 8px 10px;
+  min-width: 60px;
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+}
+
+.midi-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.midi-button.midi-rec.active {
+  background: linear-gradient(180deg, #f4a8a8 0%, #e67878 100%);
+  border-color: #c25555;
+  color: #321010;
 }
 
 .timbre-select-wrap {

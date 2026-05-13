@@ -12,6 +12,7 @@
   const playButton = document.getElementById("play-button");
   const stopButton = document.getElementById("stop-button");
   const loopButton = document.getElementById("loop-button");
+  const countdownButton = document.getElementById("countdown-button");
   const clearButton = document.getElementById("clear-button");
   const bpmInput = document.getElementById("bpm-input");
   const stepCountSelect = document.getElementById("step-count-select");
@@ -21,6 +22,8 @@
   const loadButton = document.getElementById("load-button");
   const loadFileInput = document.getElementById("load-file-input");
   const importButton = document.getElementById("import-button");
+  const midiDeviceWrap = document.getElementById("midi-device-wrap");
+  const midiDeviceSelect = document.getElementById("midi-device-select");
   const SESSION_FILE_VERSION = 1;
   const importOverlay = document.getElementById("import-overlay");
   const importClose = document.getElementById("import-close");
@@ -169,12 +172,29 @@
     tiaRowsByAudc: {},
     bpm: 120,
     loop: false,
+    countdown: false,
     patterns: {},
     patternOrder: [],
     song: [],
     currentPatternId: null,
     transportMode: "pattern",
     channelGlobals: {},
+  };
+
+  // MIDI input state. Single-target model: at most one channel has any MIDI
+  // role active. play/rec possono essere entrambi su quel canale ma cliccare
+  // un ruolo su un altro canale azzera lo stato del canale precedente.
+  const MIDI_DEVICE_KEY = "chiproll.midi.deviceId";
+  const midi = {
+    supported: typeof navigator !== "undefined" && typeof navigator.requestMIDIAccess === "function",
+    access: null,
+    inputs: [],
+    selectedInputId: null,
+    selectedInput: null,
+    playChannelId: null,
+    recChannelId: null,
+    activePlayVoices: new Map(),
+    activeRecHolds: new Map(),
   };
 
   // Counter per la generazione di ID pattern (P1, P2, ...). Non si decrementa mai
@@ -672,6 +692,11 @@
     updateLoopButtonVisual();
   });
 
+  countdownButton.addEventListener("click", () => {
+    appState.countdown = !appState.countdown;
+    updateCountdownButtonVisual();
+  });
+
   clearButton.addEventListener("click", () => {
     clearAllNotes();
   });
@@ -776,8 +801,10 @@
   stepCountSelect.value = String(currentStepCount());
   updateTransportState();
   updateLoopButtonVisual();
+  updateCountdownButtonVisual();
   updateTransportModeVisual();
   render();
+  void initMidi();
 
   window.ChipRoll = window.ChipRoll || {};
   window.ChipRoll.parseMidi = parseMidi;
@@ -880,6 +907,74 @@
 
     laneControls.appendChild(muteButton);
     laneControls.appendChild(soloButton);
+
+    if (channel.kind !== "noise") {
+      const midiAvailable = !!midi.selectedInputId;
+      const isMidiPlay = midi.playChannelId === channel.id;
+      const isMidiRec = midi.recChannelId === channel.id;
+
+      const midiPlayButton = document.createElement("button");
+      midiPlayButton.type = "button";
+      midiPlayButton.className = `lane-button midi-button midi-play ${isMidiPlay ? "active" : ""}`.trim();
+      midiPlayButton.textContent = "MIDI▶";
+      midiPlayButton.title = midiAvailable
+        ? `Route MIDI input to ${channel.name} (live monitor)`
+        : "Connect a MIDI controller and pick a device to enable";
+      midiPlayButton.disabled = !midiAvailable;
+      midiPlayButton.addEventListener("click", () => setMidiPlay(channel.id));
+
+      const midiRecButton = document.createElement("button");
+      midiRecButton.type = "button";
+      midiRecButton.className = `lane-button midi-button midi-rec ${isMidiRec ? "active" : ""}`.trim();
+      midiRecButton.textContent = "MIDI●";
+      midiRecButton.title = midiAvailable
+        ? `Arm ${channel.name} for MIDI punch-in recording (during transport Play)`
+        : "Connect a MIDI controller and pick a device to enable";
+      midiRecButton.disabled = !midiAvailable;
+      midiRecButton.addEventListener("click", () => setMidiRec(channel.id));
+
+      laneControls.appendChild(midiPlayButton);
+      laneControls.appendChild(midiRecButton);
+    }
+
+    if (channel.kind !== "noise") {
+      const octDownButton = document.createElement("button");
+      octDownButton.type = "button";
+      octDownButton.className = "lane-button shift-button";
+      octDownButton.textContent = "Oct↓";
+      octDownButton.title = `Octave down (${channel.name})`;
+      octDownButton.addEventListener("click", () => shiftChannelNotes(channel.id, "octave", -1));
+
+      const octUpButton = document.createElement("button");
+      octUpButton.type = "button";
+      octUpButton.className = "lane-button shift-button";
+      octUpButton.textContent = "Oct↑";
+      octUpButton.title = `Octave up (${channel.name})`;
+      octUpButton.addEventListener("click", () => shiftChannelNotes(channel.id, "octave", +1));
+
+      const trDownButton = document.createElement("button");
+      trDownButton.type = "button";
+      trDownButton.className = "lane-button shift-button";
+      trDownButton.textContent = "Tr↓";
+      trDownButton.title = channel.profile === "TIA"
+        ? `Shift 1 row down (${channel.name})`
+        : `Transpose 1 semitone down (${channel.name})`;
+      trDownButton.addEventListener("click", () => shiftChannelNotes(channel.id, "semitone", -1));
+
+      const trUpButton = document.createElement("button");
+      trUpButton.type = "button";
+      trUpButton.className = "lane-button shift-button";
+      trUpButton.textContent = "Tr↑";
+      trUpButton.title = channel.profile === "TIA"
+        ? `Shift 1 row up (${channel.name})`
+        : `Transpose 1 semitone up (${channel.name})`;
+      trUpButton.addEventListener("click", () => shiftChannelNotes(channel.id, "semitone", +1));
+
+      laneControls.appendChild(octDownButton);
+      laneControls.appendChild(octUpButton);
+      laneControls.appendChild(trDownButton);
+      laneControls.appendChild(trUpButton);
+    }
 
     laneHeader.appendChild(laneTitle);
     laneHeader.appendChild(laneControls);
@@ -1560,13 +1655,49 @@
     updateTransportState();
 
     const schedulerOffsetSeconds = 0.03;
-    const startTime = context.currentTime + schedulerOffsetSeconds;
+    let startTime = context.currentTime + schedulerOffsetSeconds;
+
+    if (appState.countdown) {
+      // 4-beat count-in al BPM corrente. Il transport e' gia' isPlaying=true,
+      // quindi Stop durante il count-in cancella sia i click che il playback
+      // schedulato dopo (entrambi passano per stopAllActiveVoices + clearPlaybackTimers).
+      const beatDurationSeconds = 60 / appState.bpm;
+      for (let i = 0; i < 4; i += 1) {
+        scheduleMetronomeClick(context, startTime + i * beatDurationSeconds, i === 0);
+      }
+      startTime += 4 * beatDurationSeconds;
+    }
 
     if (appState.transportMode === "song") {
       scheduleSongCycle(context, startTime);
     } else {
       schedulePatternModeCycle(context, startTime);
     }
+  }
+
+  // Click metronomo per il count-in (4 beat). Il primo beat e' "accentato"
+  // (frequenza piu' alta) per dare un riferimento di "uno" all'utente.
+  function scheduleMetronomeClick(context, time, accented) {
+    const oscillator = context.createOscillator();
+    const gainNode = context.createGain();
+    const frequency = accented ? 1800 : 1200;
+    const peakGain = accented ? 0.35 : 0.25;
+    const clickDuration = 0.08;
+
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(frequency, time);
+    gainNode.gain.setValueAtTime(0.0001, time);
+    gainNode.gain.linearRampToValueAtTime(peakGain, time + 0.003);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, time + clickDuration);
+
+    oscillator.connect(gainNode);
+    gainNode.connect(context.destination);
+    oscillator.start(time);
+    oscillator.stop(time + clickDuration + 0.01);
+
+    // Registro come voce attiva cosi' stopPlayback (e quindi Stop o Space-toggle)
+    // taglia i click ancora schedulati durante un count-in interrotto.
+    registerVoice(oscillator, [oscillator, gainNode]);
   }
 
   // Pattern mode: schedula il pattern in edit, gestisce loop auto-richiamandosi.
@@ -1684,6 +1815,7 @@
           }
         }
         activeStep = patternId === appState.currentPatternId ? step : null;
+        tickMidiRecContinuation(patternId, step);
         render();
       }, Math.max(0, (stepStartTime - context.currentTime) * 1000));
       playheadTimerIds.push(playheadTimerId);
@@ -1735,6 +1867,10 @@
     activeStep = null;
     activeSongIndex = null;
     isPlaying = false;
+    // Transport fermo: i punch-in hold non hanno piu' uno step su cui propagarsi.
+    // Le Play voices (monitor live) restano: il monitor MIDI e' indipendente dal
+    // trasporto.
+    midi.activeRecHolds.clear();
     updateTransportState();
     render();
   }
@@ -1843,6 +1979,69 @@
     registerVoice(source, [source, gainNode]);
   }
 
+  // Voce "sustained" usata dal MIDI live monitor: l'oscillator/source resta
+  // attivo finche' non si chiama stopSustainedVoice (su MIDI note-off). Inviluppo
+  // attack al peak gain, sustain piatto, release lineare al note-off.
+  function startSustainedChipVoice(context, waveform, frequency) {
+    const startTime = context.currentTime;
+    let source;
+    let peakGain;
+
+    if (waveform === "square") {
+      source = context.createOscillator();
+      source.type = "square";
+      source.frequency.setValueAtTime(frequency, startTime);
+      peakGain = 0.18;
+    } else if (waveform === "triangle") {
+      source = context.createOscillator();
+      source.type = "triangle";
+      source.frequency.setValueAtTime(frequency, startTime);
+      peakGain = 0.24;
+    } else if (waveform === "noise") {
+      source = context.createBufferSource();
+      source.buffer = getNoiseBuffer(context);
+      source.loop = true;
+      peakGain = 0.14;
+    } else {
+      return null;
+    }
+
+    const gainNode = context.createGain();
+    gainNode.gain.setValueAtTime(0.0001, startTime);
+    gainNode.gain.linearRampToValueAtTime(peakGain, startTime + ATTACK_SECONDS);
+
+    source.connect(gainNode);
+    gainNode.connect(context.destination);
+    source.start(startTime);
+
+    return { source, gainNode, context, stopped: false };
+  }
+
+  function stopSustainedVoice(voice) {
+    if (!voice || voice.stopped) {
+      return;
+    }
+    voice.stopped = true;
+
+    const now = voice.context.currentTime;
+    const releaseEnd = now + RELEASE_SECONDS;
+
+    try {
+      const currentGain = voice.gainNode.gain.value;
+      voice.gainNode.gain.cancelScheduledValues(now);
+      voice.gainNode.gain.setValueAtTime(currentGain, now);
+      voice.gainNode.gain.linearRampToValueAtTime(0.0001, releaseEnd);
+    } catch (err) {
+      // ignore: il param e' gia' in stato finale
+    }
+
+    try {
+      voice.source.stop(releaseEnd + 0.005);
+    } catch (err) {
+      // Source potrebbe essere gia' fermo: ignora.
+    }
+  }
+
   function getNoiseBuffer(context) {
     if (cachedNoiseBuffer && cachedNoiseBuffer.sampleRate === context.sampleRate) {
       return cachedNoiseBuffer;
@@ -1919,6 +2118,11 @@
     }
 
     stopPlayback();
+    // Cambio chip = channel id set diverso (pulse1/tia1/pokey1...): qualunque
+    // assegnazione MIDI Play/Rec va azzerata, altrimenti puntano a canali fantasma.
+    midi.playChannelId = null;
+    midi.recChannelId = null;
+    releaseAllMidiHolds();
     appState.activeChip = nextChip;
     resetChannelsForChip(nextChip);
     render();
@@ -2143,6 +2347,137 @@
     render();
   }
 
+  const TIA_SHIFT_WARN_KEY = "chiproll.tia.shift.warned";
+  const TIA_OCT_MAX_CENTS = 600;
+
+  function maybeWarnTiaShift() {
+    try {
+      if (window.localStorage && window.localStorage.getItem(TIA_SHIFT_WARN_KEY)) {
+        return;
+      }
+    } catch (err) {
+      // localStorage non disponibile: mostra l'alert comunque, non e' un blocker.
+    }
+
+    window.alert(
+      "TIA: pitch rows are not equally spaced in semitones.\n\n" +
+        "• Tr↑/Tr↓ shift by 1 row (next available pitch).\n" +
+        "• Oct↑/Oct↓ look for the row closest to ±1 real octave; notes without a reasonable destination are discarded.\n\n" +
+        "(Shown only the first time.)",
+    );
+
+    try {
+      if (window.localStorage) {
+        window.localStorage.setItem(TIA_SHIFT_WARN_KEY, "1");
+      }
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  function shiftChannelNotes(channelId, mode, direction) {
+    const channel = getCurrentChannels().find((c) => c.id === channelId);
+    if (!channel || channel.kind === "noise") {
+      return;
+    }
+
+    const data = channelData(channelId);
+    if (!data || data.notes.size === 0) {
+      return;
+    }
+
+    if (channel.profile === "TIA") {
+      maybeWarnTiaShift();
+    }
+
+    const rows = channel.rows;
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return;
+    }
+
+    const plan = [];
+    let dropped = 0;
+
+    for (const [key, entry] of data.notes) {
+      const oldRowIdx = rows.findIndex((r) => r.id === entry.rowId);
+      if (oldRowIdx < 0) {
+        plan.push({ drop: true });
+        dropped += 1;
+        continue;
+      }
+
+      const oldRow = rows[oldRowIdx];
+      let newRow = null;
+
+      if (channel.profile === "TIA") {
+        if (mode === "semitone") {
+          // rows sorted by hz desc → up in pitch = decrement index.
+          const newIdx = oldRowIdx - direction;
+          if (newIdx >= 0 && newIdx < rows.length) {
+            newRow = rows[newIdx];
+          }
+        } else {
+          // octave: target hz, find closest row within 600 cents.
+          const targetHz = oldRow.outputHz * (direction > 0 ? 2 : 0.5);
+          let bestIdx = -1;
+          let bestCents = Infinity;
+          for (let i = 0; i < rows.length; i += 1) {
+            const candidateHz = rows[i].outputHz;
+            const cents = Math.abs(1200 * Math.log2(candidateHz / targetHz));
+            if (cents < bestCents) {
+              bestCents = cents;
+              bestIdx = i;
+            }
+          }
+          if (bestIdx >= 0 && bestCents <= TIA_OCT_MAX_CENTS) {
+            newRow = rows[bestIdx];
+          }
+        }
+      } else {
+        // Chromatic (NES Pulse/Triangle, POKEY): shift midi.
+        const deltaSemitones = mode === "octave" ? direction * 12 : direction;
+        const targetMidi = oldRow.midi + deltaSemitones;
+        newRow = rows.find((r) => r.midi === targetMidi) || null;
+      }
+
+      if (!newRow) {
+        plan.push({ drop: true });
+        dropped += 1;
+        continue;
+      }
+
+      plan.push({
+        oldKey: key,
+        newKey: `${newRow.id}:${entry.step}`,
+        newRow,
+        entry,
+      });
+    }
+
+    if (dropped > 0) {
+      const message = `${dropped} note${dropped === 1 ? "" : "s"} would fall outside the grid and will be discarded. Proceed?`;
+      if (!window.confirm(message)) {
+        return;
+      }
+    }
+
+    // Rebuild notes map. Monofonia per canale garantisce nessuna collisione tra
+    // note shiftate (shift uniforme su tutte le note). Le entry vengono rigenerate
+    // via createEntryForCell così hz/registro/nearest/audc tornano coerenti con la
+    // nuova riga, ma isContinuation viene preservato.
+    data.notes.clear();
+    for (const item of plan) {
+      if (item.drop) {
+        continue;
+      }
+      const rebuilt = createEntryForCell(channel, item.newRow, item.entry.step);
+      rebuilt.isContinuation = item.entry.isContinuation === true;
+      data.notes.set(item.newKey, rebuilt);
+    }
+
+    render();
+  }
+
   function isChannelAudible(channelId) {
     const currentChannels = getCurrentChannels();
     const anySolo = currentChannels.some((channel) => channelMixer(channel.id).solo);
@@ -2158,6 +2493,414 @@
 
     return mixer.solo;
   }
+
+  // === MIDI input subsystem =================================================
+  // Web MIDI API: l'utente collega un controller, ne sceglie uno (se molteplici),
+  // e attiva per canale "Play" (monitor live) e/o "Rec" (punch-in durante
+  // transport Play). Strict mutual exclusivity: solo UN canale alla volta puo'
+  // avere ruoli MIDI attivi. Cliccare un ruolo su un canale diverso azzera lo
+  // stato del canale precedente.
+
+  async function initMidi() {
+    if (!midi.supported) {
+      console.info("[MIDI] Web MIDI API non supportata da questo browser.");
+      renderMidiDeviceSelect();
+      return;
+    }
+
+    try {
+      midi.access = await navigator.requestMIDIAccess();
+      midi.access.addEventListener("statechange", refreshMidiInputs);
+      refreshMidiInputs();
+    } catch (err) {
+      console.warn("[MIDI] requestMIDIAccess fallita o negata:", err);
+      renderMidiDeviceSelect();
+    }
+  }
+
+  function refreshMidiInputs() {
+    if (!midi.access) {
+      renderMidiDeviceSelect();
+      return;
+    }
+
+    midi.inputs = [];
+    for (const input of midi.access.inputs.values()) {
+      midi.inputs.push({ id: input.id, name: input.name || "(unnamed)" });
+    }
+
+    // Se il device attualmente selezionato e' sparito, smolla.
+    if (midi.selectedInputId && !midi.inputs.some((i) => i.id === midi.selectedInputId)) {
+      selectMidiInput(null, { persist: false });
+    }
+
+    // Se nessuno e' selezionato, prova a ripristinare la preferenza locale o,
+    // in alternativa, auto-selezione se c'e' un solo input disponibile.
+    if (!midi.selectedInputId) {
+      let preferred = null;
+      try {
+        preferred = window.localStorage ? window.localStorage.getItem(MIDI_DEVICE_KEY) : null;
+      } catch (err) {
+        // localStorage non disponibile (storage disabilitato/incognito): ignora.
+      }
+
+      if (preferred && midi.inputs.some((i) => i.id === preferred)) {
+        selectMidiInput(preferred, { persist: false });
+      } else if (midi.inputs.length === 1) {
+        selectMidiInput(midi.inputs[0].id, { persist: false });
+      }
+    }
+
+    renderMidiDeviceSelect();
+    // Plug/unplug puo' cambiare l'enabled-state dei pulsanti MIDI per-canale:
+    // re-render del piano roll per riflettere disabled/enabled.
+    render();
+  }
+
+  function selectMidiInput(inputId, { persist = true } = {}) {
+    // Stacca il listener dal device precedente prima di cambiare.
+    if (midi.selectedInput) {
+      try {
+        midi.selectedInput.onmidimessage = null;
+      } catch (err) {
+        // ignore
+      }
+    }
+
+    midi.selectedInputId = inputId || null;
+    midi.selectedInput = null;
+
+    // Cambio device = qualunque nota MIDI attualmente trattenuta viene rilasciata
+    // per evitare voci appese o continuation infinita.
+    releaseAllMidiHolds();
+
+    if (inputId && midi.access) {
+      const input = midi.access.inputs.get(inputId);
+      if (input) {
+        midi.selectedInput = input;
+        input.onmidimessage = onMidiMessage;
+        if (persist) {
+          try {
+            if (window.localStorage) {
+              window.localStorage.setItem(MIDI_DEVICE_KEY, inputId);
+            }
+          } catch (err) {
+            // ignore
+          }
+        }
+      }
+    } else if (persist) {
+      try {
+        if (window.localStorage) {
+          window.localStorage.removeItem(MIDI_DEVICE_KEY);
+        }
+      } catch (err) {
+        // ignore
+      }
+    }
+  }
+
+  function renderMidiDeviceSelect() {
+    if (!midiDeviceWrap || !midiDeviceSelect) {
+      return;
+    }
+
+    if (!midi.supported) {
+      midiDeviceWrap.hidden = true;
+      return;
+    }
+
+    if (midi.inputs.length === 0) {
+      midiDeviceWrap.hidden = true;
+      midiDeviceSelect.innerHTML = "";
+      return;
+    }
+
+    midiDeviceWrap.hidden = false;
+    midiDeviceSelect.innerHTML = "";
+
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "(none)";
+    midiDeviceSelect.appendChild(placeholder);
+
+    for (const input of midi.inputs) {
+      const option = document.createElement("option");
+      option.value = input.id;
+      option.textContent = input.name;
+      midiDeviceSelect.appendChild(option);
+    }
+
+    midiDeviceSelect.value = midi.selectedInputId || "";
+  }
+
+  if (midiDeviceSelect) {
+    midiDeviceSelect.addEventListener("change", (event) => {
+      selectMidiInput(event.target.value || null);
+      render();
+    });
+  }
+
+  function onMidiMessage(event) {
+    const data = event.data;
+    if (!data || data.length < 2) {
+      return;
+    }
+
+    const status = data[0];
+    const command = status & 0xf0;
+    const note = data[1] & 0x7f;
+    const velocity = data.length > 2 ? data[2] & 0x7f : 0;
+
+    if (command === 0x90 && velocity > 0) {
+      handleMidiNoteOn(note);
+    } else if (command === 0x80 || (command === 0x90 && velocity === 0)) {
+      handleMidiNoteOff(note);
+    }
+    // CC, pitch bend, aftertouch, system messages: ignorati (fuori scope chip music).
+  }
+
+  function findRowForMidi(channel, midiNote) {
+    const rows = channel.rows;
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return null;
+    }
+
+    if (channel.profile === "TIA") {
+      const targetHz = midiToHz(midiNote);
+      let best = rows[0];
+      let bestCents = Infinity;
+      for (const r of rows) {
+        const cents = Math.abs(1200 * Math.log2(r.outputHz / targetHz));
+        if (cents < bestCents) {
+          bestCents = cents;
+          best = r;
+        }
+      }
+      return best;
+    }
+
+    // Chromatic (NES Pulse/Triangle, POKEY): match midi esatto se in range,
+    // altrimenti clamp alla riga col midi piu' vicino.
+    const exact = rows.find((r) => r.midi === midiNote);
+    if (exact) {
+      return exact;
+    }
+
+    let best = rows[0];
+    let bestDist = Math.abs(rows[0].midi - midiNote);
+    for (let i = 1; i < rows.length; i += 1) {
+      const d = Math.abs(rows[i].midi - midiNote);
+      if (d < bestDist) {
+        bestDist = d;
+        best = rows[i];
+      }
+    }
+    return best;
+  }
+
+  function handleMidiNoteOn(midiNote) {
+    // PLAY: monitor live audio attraverso il canale Play (anche a trasporto fermo).
+    if (midi.playChannelId) {
+      const channel = getCurrentChannels().find((c) => c.id === midi.playChannelId);
+      if (channel && channel.kind !== "noise") {
+        const row = findRowForMidi(channel, midiNote);
+        if (row && isChannelAudible(channel.id)) {
+          startMidiPlayVoice(channel, row, midiNote);
+        }
+      }
+    }
+
+    // REC: punch-in solo durante transport Play.
+    if (midi.recChannelId && isPlaying && activeStep !== null) {
+      const channel = getCurrentChannels().find((c) => c.id === midi.recChannelId);
+      if (channel && channel.kind !== "noise") {
+        const row = findRowForMidi(channel, midiNote);
+        if (row) {
+          writeMidiRecCell(channel, row, activeStep, false);
+          midi.activeRecHolds.set(midiNote, {
+            channelId: channel.id,
+            rowId: row.id,
+            startPatternId: appState.currentPatternId,
+            lastStep: activeStep,
+          });
+          render();
+        }
+      }
+    }
+  }
+
+  function handleMidiNoteOff(midiNote) {
+    const voice = midi.activePlayVoices.get(midiNote);
+    if (voice) {
+      // Distinguo marker (race-guard) da voice reale: il marker non ha .source.
+      if (voice.source) {
+        stopSustainedVoice(voice);
+      } else {
+        voice.canceled = true;
+      }
+      midi.activePlayVoices.delete(midiNote);
+    }
+
+    midi.activeRecHolds.delete(midiNote);
+  }
+
+  function releaseAllMidiHolds() {
+    for (const voice of midi.activePlayVoices.values()) {
+      try {
+        if (voice.source) {
+          stopSustainedVoice(voice);
+        } else {
+          voice.canceled = true;
+        }
+      } catch (err) {
+        // ignore
+      }
+    }
+    midi.activePlayVoices.clear();
+    midi.activeRecHolds.clear();
+  }
+
+  async function startMidiPlayVoice(channel, row, midiNote) {
+    // Race-guard: ensureAudioContext() puo' awaitare un resume. Riserva uno slot
+    // marker prima di awaitare; se durante l'await arriva il note-off, il marker
+    // viene rimosso dalla map e qui rilevo la cancellazione.
+    const marker = { canceled: false };
+    midi.activePlayVoices.set(midiNote, marker);
+
+    const entry = createEntryForCell(channel, row, 0);
+    if (!isFinitePositive(entry.hz)) {
+      if (midi.activePlayVoices.get(midiNote) === marker) {
+        midi.activePlayVoices.delete(midiNote);
+      }
+      return;
+    }
+
+    let context;
+    try {
+      context = await ensureAudioContext();
+    } catch (err) {
+      if (midi.activePlayVoices.get(midiNote) === marker) {
+        midi.activePlayVoices.delete(midiNote);
+      }
+      return;
+    }
+
+    if (midi.activePlayVoices.get(midiNote) !== marker || marker.canceled) {
+      // note-off arrivato durante l'await (o un nuovo note-on ha rimpiazzato il marker)
+      return;
+    }
+
+    const voice = startSustainedChipVoice(context, channel.waveform, entry.hz);
+    if (!voice) {
+      midi.activePlayVoices.delete(midiNote);
+      return;
+    }
+
+    midi.activePlayVoices.set(midiNote, voice);
+  }
+
+  function writeMidiRecCell(channel, row, step, isContinuation) {
+    const data = channelData(channel.id);
+    if (!data) {
+      return;
+    }
+
+    // Monofonia: una sola nota per step su un canale.
+    clearChannelStep(channel.id, step);
+
+    const entry = createEntryForCell(channel, row, step);
+    entry.isContinuation = isContinuation === true;
+    data.notes.set(`${row.id}:${step}`, entry);
+  }
+
+  function tickMidiRecContinuation(patternId, step) {
+    if (midi.activeRecHolds.size === 0 || !midi.recChannelId) {
+      return;
+    }
+
+    // Continuation viene scritta solo sul pattern attualmente in edit. Se
+    // l'auto-follow Song mode ha appena cambiato pattern, lo skip qui evita di
+    // scrivere su pattern non target.
+    if (patternId !== appState.currentPatternId) {
+      return;
+    }
+
+    const channel = getCurrentChannels().find((c) => c.id === midi.recChannelId);
+    if (!channel) {
+      return;
+    }
+    const rows = channel.rows;
+    if (!Array.isArray(rows)) {
+      return;
+    }
+
+    for (const hold of midi.activeRecHolds.values()) {
+      if (hold.channelId !== midi.recChannelId) {
+        // L'utente ha cambiato canale Rec mentre teneva premuto: il vecchio
+        // hold sopravvive nella map ma non viene piu' propagato.
+        continue;
+      }
+      if (hold.startPatternId !== patternId) {
+        // Song mode ha cambiato pattern: la continuation di un hold iniziato
+        // su un pattern precedente non si propaga oltre il pattern di partenza.
+        continue;
+      }
+      if (step <= hold.lastStep) {
+        // Loop ha riavvolto al ai primi step (wrap), oppure due tick sullo stesso
+        // step: in entrambi i casi non estendere oltre.
+        continue;
+      }
+
+      const row = rows.find((r) => r.id === hold.rowId);
+      if (!row) {
+        continue;
+      }
+
+      writeMidiRecCell(channel, row, step, true);
+      hold.lastStep = step;
+    }
+  }
+
+  function setMidiPlay(channelId) {
+    if (!midi.selectedInputId) {
+      return;
+    }
+
+    if (midi.playChannelId === channelId) {
+      midi.playChannelId = null;
+      releaseAllMidiHolds();
+    } else {
+      // Strict mutual exclusivity: un solo canale puo' avere ruoli MIDI.
+      if (midi.recChannelId && midi.recChannelId !== channelId) {
+        midi.recChannelId = null;
+      }
+      midi.playChannelId = channelId;
+      releaseAllMidiHolds();
+    }
+    render();
+  }
+
+  function setMidiRec(channelId) {
+    if (!midi.selectedInputId) {
+      return;
+    }
+
+    if (midi.recChannelId === channelId) {
+      midi.recChannelId = null;
+      midi.activeRecHolds.clear();
+    } else {
+      if (midi.playChannelId && midi.playChannelId !== channelId) {
+        midi.playChannelId = null;
+        releaseAllMidiHolds();
+      }
+      midi.recChannelId = channelId;
+      midi.activeRecHolds.clear();
+    }
+    render();
+  }
+
+  // === fine MIDI subsystem ==================================================
 
   function clearAllNotes() {
     const confirmed = window.confirm("Clear all notes?");
@@ -2210,6 +2953,7 @@
       chip: appState.activeChip,
       bpm: appState.bpm,
       loop: appState.loop,
+      countdown: appState.countdown,
       channelGlobals: appState.channelGlobals,
       patterns: patternsOut,
       patternOrder: appState.patternOrder,
@@ -2280,9 +3024,16 @@
   function applyLoadedSession(data) {
     stopPlayback();
 
+    // Sessione nuova: smolla qualunque assegnazione MIDI vecchia (i channel id
+    // potrebbero cambiare se il file e' di un chip diverso).
+    midi.playChannelId = null;
+    midi.recChannelId = null;
+    releaseAllMidiHolds();
+
     appState.activeChip = data.chip;
     appState.bpm = data.bpm;
     appState.loop = Boolean(data.loop);
+    appState.countdown = Boolean(data.countdown);
     appState.channelGlobals = data.channelGlobals;
     appState.patternOrder = data.patternOrder.slice();
     appState.song = data.song.slice();
@@ -2342,6 +3093,7 @@
     stepCountSelect.value = String(currentStepCount());
     updateHeaderCopy();
     updateLoopButtonVisual();
+    updateCountdownButtonVisual();
     updateTransportModeVisual();
     updateTransportState();
     render();
@@ -2767,6 +3519,12 @@
 
     stopPlayback();
 
+    // Import MIDI = replace totale: smolla MIDI play/rec assegnazioni prima
+    // del reset, cosi' non rimangono puntate a canali di un chip precedente.
+    midi.playChannelId = null;
+    midi.recChannelId = null;
+    releaseAllMidiHolds();
+
     // BPM dell'import: clamp negli stessi limiti dell'input UI.
     const newBpm = Math.max(BPM_MIN, Math.min(BPM_MAX, Math.round(payload.bpm || 120)));
     appState.bpm = newBpm;
@@ -3090,6 +3848,11 @@
   function updateTransportState() {
     playButton.disabled = isPlaying;
     stopButton.disabled = !isPlaying;
+  }
+
+  function updateCountdownButtonVisual() {
+    countdownButton.classList.toggle("countdown-active", appState.countdown);
+    countdownButton.setAttribute("aria-pressed", String(appState.countdown));
   }
 
   function updateLoopButtonVisual() {
