@@ -1614,7 +1614,6 @@
     const stepDurationSeconds = getStepDurationSeconds();
     const stepCount = pattern.stepCount;
     const channels = getChannelsForPattern(patternId);
-    const isEditPattern = patternId === appState.currentPatternId;
 
     // Voice scheduling per canale, con run merging: una nota tenuta per piu'
     // step consecutivi (drag) scheda una sola voce con durata estesa, cosi'
@@ -1665,17 +1664,26 @@
       }
     }
 
-    // Playhead step-by-step: aggiorna activeStep solo se questo pattern e' anche
-    // quello in edit (altrimenti il piano roll mostra un altro pattern e il
-    // playhead sarebbe fuorviante). activeSongIndex viene comunque aggiornato a
-    // ogni inizio pattern in Song mode.
+    // Playhead step-by-step. In Song mode, all'inizio di ogni pattern facciamo
+    // **auto-follow**: la vista del piano roll switcha al pattern in playback in
+    // modo che la barra non si "perda" su un pattern fermo dopo il primo. Solo
+    // mentre isPlaying e' true: a riproduzione ferma il pattern in edit resta
+    // dove l'auto-follow l'ha lasciato (= ultimo pattern in playback al momento
+    // dello Stop), coerente con il pattern visto dall'utente in quel momento.
+    //
+    // activeStep viene ricomputato a fire-time perche' currentPatternId puo'
+    // cambiare dall'auto-follow tra uno step e l'altro: non possiamo catturare
+    // isEditPattern alla schedulazione (sarebbe stale).
     for (let step = 0; step < stepCount; step += 1) {
       const stepStartTime = sequenceStartTime + step * stepDurationSeconds;
       const playheadTimerId = window.setTimeout(() => {
         if (songIndex !== null && step === 0) {
           activeSongIndex = songIndex;
+          if (isPlaying && appState.currentPatternId !== patternId) {
+            appState.currentPatternId = patternId;
+          }
         }
-        activeStep = isEditPattern ? step : null;
+        activeStep = patternId === appState.currentPatternId ? step : null;
         render();
       }, Math.max(0, (stepStartTime - context.currentTime) * 1000));
       playheadTimerIds.push(playheadTimerId);
