@@ -31,10 +31,11 @@
   function buildTrackAssigner(gmMapping) {
     const { getMapping } = gmMapping;
 
-    const SUPPORTED_CHIPS = ["NES", "TIA"];
+    const SUPPORTED_CHIPS = ["NES", "TIA", "POKEY"];
     const C3_MIDI = 48; // soglia bass-by-median, esclusiva: median strict < 48 -> basso.
     const NES_PULSE_CHANNELS = ["pulse1", "pulse2"];
     const TIA_SLOTS = ["tia1", "tia2"];
+    const POKEY_SLOTS = ["pokey1", "pokey2", "pokey3", "pokey4"];
 
     function assignTracks(tracks, chip) {
       if (!Array.isArray(tracks)) {
@@ -45,7 +46,9 @@
         throw new Error(`Unsupported chip: ${chip}. Available: ${SUPPORTED_CHIPS.join(", ")}`);
       }
 
-      return chip === "NES" ? assignNes(tracks) : assignTia(tracks);
+      if (chip === "NES") return assignNes(tracks);
+      if (chip === "TIA") return assignTia(tracks);
+      return assignPokey(tracks);
     }
 
     function assignNes(tracks) {
@@ -189,6 +192,77 @@
       }
 
       return "TIA channels (Ch.1 / Ch.2) already taken";
+    }
+
+    function assignPokey(tracks) {
+      // POKEY ha 4 canali tutti melodici con timbro per-pattern (Pure/Buzz/Noise).
+      // Strategia (4 slot, uno per priorita'):
+      //  1. Bass track  → CH1 con personality "Smooth bass" (sara' Pure tone)
+      //  2. Percussion  → CH2 con personality "Noise/Percussion" (sara' Noise)
+      //  3. Lead/altre  → CH3, CH4 con personality derivata da GM family
+      //  4. Surplus     → unassigned
+      const assigned = [];
+      const unassigned = [];
+      const claimed = new Set();
+      let slotIdx = 0;
+
+      const bassIdx = findFirst(tracks, claimed, isBassTrack);
+      if (bassIdx !== -1 && slotIdx < POKEY_SLOTS.length) {
+        claimed.add(bassIdx);
+        assigned.push({
+          track: tracks[bassIdx],
+          channel: POKEY_SLOTS[slotIdx],
+          personality: "Smooth bass",
+        });
+        slotIdx += 1;
+      }
+
+      const percIdx = findFirst(tracks, claimed, isPercussionTrack);
+      if (percIdx !== -1 && slotIdx < POKEY_SLOTS.length) {
+        claimed.add(percIdx);
+        assigned.push({
+          track: tracks[percIdx],
+          channel: POKEY_SLOTS[slotIdx],
+          personality: "Noise/Percussion",
+        });
+        slotIdx += 1;
+      }
+
+      // Tracce rimanenti -> riempiono CH3, CH4 (e CH1/CH2 se non occupati da bass/perc).
+      for (let i = 0; i < tracks.length; i += 1) {
+        if (claimed.has(i)) continue;
+
+        const track = tracks[i];
+
+        if (slotIdx >= POKEY_SLOTS.length) {
+          unassigned.push({ track, reason: pokeyUnassignedReason(track) });
+          claimed.add(i);
+          continue;
+        }
+
+        const mapping = getMapping(track.gmProgram, "POKEY", isPercussionTrack(track));
+        assigned.push({
+          track,
+          channel: POKEY_SLOTS[slotIdx],
+          personality: mapping.personality,
+        });
+        slotIdx += 1;
+        claimed.add(i);
+      }
+
+      return { assigned, unassigned };
+    }
+
+    function pokeyUnassignedReason(track) {
+      if (isPercussionTrack(track)) {
+        return "POKEY noise slot already taken by another percussion track";
+      }
+
+      if (isBassTrack(track)) {
+        return "POKEY bass slot already taken by another bass track";
+      }
+
+      return "POKEY channels (CH1-CH4) already taken";
     }
 
     function isPercussionTrack(track) {

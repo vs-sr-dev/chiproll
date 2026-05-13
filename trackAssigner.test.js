@@ -8,7 +8,7 @@ const {
   isPercussionTrack,
 } = require("./trackAssigner");
 
-assert.deepEqual(SUPPORTED_CHIPS, ["NES", "TIA"]);
+assert.deepEqual(SUPPORTED_CHIPS, ["NES", "TIA", "POKEY"]);
 assert.equal(C3_MIDI, 48);
 
 function makeTrack(name, gmProgram, isPercussion, pitches = []) {
@@ -212,6 +212,56 @@ function makeTrack(name, gmProgram, isPercussion, pitches = []) {
   assert.equal(isPercussionTrack({ isPercussion: false }), false);
   assert.equal(isPercussionTrack(null), false);
   assert.equal(isPercussionTrack({}), false);
+}
+
+// 12b) POKEY: 4 tracce (bass + drums + 2 melodici) -> tutti assegnati su CH1-CH4 in priorita'.
+{
+  const lead = makeTrack("Lead", 27, false, [60, 62, 64]);
+  const second = makeTrack("Pad", 90, false, [55, 57]);
+  const bass = makeTrack("Bass", 34, false, [36, 38]);
+  const drums = makeTrack("Drums", 0, true, [38, 42]);
+
+  const result = assignTracks([lead, second, bass, drums], "POKEY");
+
+  assert.equal(result.unassigned.length, 0);
+  assert.equal(result.assigned.length, 4);
+
+  const byChannel = Object.fromEntries(result.assigned.map((a) => [a.channel, a]));
+  assert.equal(byChannel.pokey1.track, bass);
+  assert.equal(byChannel.pokey1.personality, "Smooth bass");
+  assert.equal(byChannel.pokey2.track, drums);
+  assert.equal(byChannel.pokey2.personality, "Noise/Percussion");
+  assert.equal(byChannel.pokey3.track, lead);
+  assert.equal(byChannel.pokey3.personality, "Standard square");
+  assert.equal(byChannel.pokey4.track, second);
+  assert.equal(byChannel.pokey4.personality, "Soft square");
+}
+
+// 12c) POKEY: solo 2 melodiche, niente bass/drums -> CH1, CH2 (riempimento ordinato).
+{
+  const lead = makeTrack("Lead", 27, false, [60, 62]);
+  const second = makeTrack("Second", 73, false, [67, 69]);
+  const result = assignTracks([lead, second], "POKEY");
+  assert.equal(result.assigned.length, 2);
+  assert.equal(result.unassigned.length, 0);
+  assert.equal(result.assigned[0].channel, "pokey1");
+  assert.equal(result.assigned[1].channel, "pokey2");
+}
+
+// 12d) POKEY: surplus oltre 4 canali -> il 5° finisce in unassigned.
+{
+  const tracks = [
+    makeTrack("Bass", 34, false, [36]),
+    makeTrack("Drums", 0, true, [42]),
+    makeTrack("M1", 27, false, [60]),
+    makeTrack("M2", 73, false, [62]),
+    makeTrack("M3 extra", 80, false, [64]),
+  ];
+  const result = assignTracks(tracks, "POKEY");
+  assert.equal(result.assigned.length, 4);
+  assert.equal(result.unassigned.length, 1);
+  assert.equal(result.unassigned[0].track.name, "M3 extra");
+  assert.match(result.unassigned[0].reason, /POKEY/);
 }
 
 // 13) Errori.

@@ -19,7 +19,7 @@
       "Noise/Percussion",
     ];
 
-    const SUPPORTED_CHIPS = ["NES", "TIA"];
+    const SUPPORTED_CHIPS = ["NES", "TIA", "POKEY"];
 
     // Tabella personalità per fascia GM (chip-agnostica, intento musicale).
     // Allineata 1:1 alla tabella NES del brief: il duty cycle determina la personalità,
@@ -85,17 +85,17 @@
       }
 
       if (isPercussion) {
-        return chip === "NES"
-          ? { personality: "Noise/Percussion", channelType: "noise", dutyOrAudc: null }
-          : { personality: "Noise/Percussion", channelType: "noise", dutyOrAudc: 8 };
+        if (chip === "NES") return { personality: "Noise/Percussion", channelType: "noise", dutyOrAudc: null };
+        if (chip === "POKEY") return { personality: "Noise/Percussion", channelType: "noise", dutyOrAudc: 0x80 };
+        return { personality: "Noise/Percussion", channelType: "noise", dutyOrAudc: 8 };
       }
 
       const program = normalizeProgram(gmProgram);
       const personality = findRange(program).personality;
 
-      return chip === "NES"
-        ? buildNesConfig(personality)
-        : buildTiaConfig(personality, program);
+      if (chip === "NES") return buildNesConfig(personality);
+      if (chip === "POKEY") return buildPokeyConfig(personality);
+      return buildTiaConfig(personality, program);
     }
 
     function buildNesConfig(personality) {
@@ -112,6 +112,26 @@
           return { personality, channelType: "noise", dutyOrAudc: null };
         default:
           throw new Error(`Unhandled NES personality: ${personality}`);
+      }
+    }
+
+    function buildPokeyConfig(personality) {
+      // POKEY timbres: $A0 = Pure tone, $E0 = Buzz, $80 = Noise.
+      // Mappiamo le personality "chip-agnostiche" sul timbro piu' coerente:
+      // - Smooth bass / Soft / Standard → Pure tone (clean, suoni "puliti")
+      // - Sharp square                    → Buzz (timbro brillante/aggressivo)
+      // - Noise/Percussion                → Noise (rumore via poly17)
+      // L'utente puo' sempre ridurre il timbro nell'UI per-pattern dopo l'import.
+      switch (personality) {
+        case "Sharp square":
+          return { personality, channelType: "pokey", dutyOrAudc: 0xE0 };
+        case "Noise/Percussion":
+          return { personality, channelType: "noise", dutyOrAudc: 0x80 };
+        case "Soft square":
+        case "Standard square":
+        case "Smooth bass":
+        default:
+          return { personality, channelType: "pokey", dutyOrAudc: 0xA0 };
       }
     }
 

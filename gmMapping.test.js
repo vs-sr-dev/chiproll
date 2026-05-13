@@ -15,7 +15,7 @@ assert.deepEqual(PERSONALITIES, [
   "Smooth bass",
   "Noise/Percussion",
 ]);
-assert.deepEqual(SUPPORTED_CHIPS, ["NES", "TIA"]);
+assert.deepEqual(SUPPORTED_CHIPS, ["NES", "TIA", "POKEY"]);
 
 // 1) GM 0 (Piano) - "attacco secco, classico chip"
 assert.deepEqual(getMapping(0, "NES"), {
@@ -165,6 +165,35 @@ assert.equal(getPersonalityLabel(40), "Soft square");
 // 13) Boundary TIA AUDC: 55 -> AUDC 12, 56 -> AUDC 1.
 assert.equal(getMapping(55, "TIA").dutyOrAudc, 12);
 assert.equal(getMapping(56, "TIA").dutyOrAudc, 1);
+
+// 13b) POKEY mapping: Sharp square -> Buzz ($E0), Smooth/Soft/Standard -> Pure tone ($A0),
+//      Noise/Percussion -> Noise ($80). Tutti i melodici escono come channelType "pokey",
+//      la percussione come "noise".
+assert.deepEqual(getMapping(0, "POKEY"), {
+  personality: "Sharp square",
+  channelType: "pokey",
+  dutyOrAudc: 0xE0,
+}); // Piano family -> Sharp -> Buzz
+assert.deepEqual(getMapping(34, "POKEY"), {
+  personality: "Smooth bass",
+  channelType: "pokey",
+  dutyOrAudc: 0xA0,
+}); // Bass -> Pure tone
+assert.deepEqual(getMapping(56, "POKEY"), {
+  personality: "Sharp square",
+  channelType: "pokey",
+  dutyOrAudc: 0xE0,
+}); // Brass -> Sharp -> Buzz
+assert.deepEqual(getMapping(73, "POKEY"), {
+  personality: "Soft square",
+  channelType: "pokey",
+  dutyOrAudc: 0xA0,
+}); // Flute -> Soft -> Pure tone
+assert.deepEqual(getMapping(0, "POKEY", true), {
+  personality: "Noise/Percussion",
+  channelType: "noise",
+  dutyOrAudc: 0x80,
+}); // Ch.9 percussion -> Noise
 
 // 14) Casi di errore.
 assert.throws(() => getMapping(0, "GBC"), /Unsupported chip/);

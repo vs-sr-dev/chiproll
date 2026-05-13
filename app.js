@@ -2402,8 +2402,13 @@
     // __sourceIndex sopravvive lungo la pipeline.
     const tagged = parsedSong.tracks.map((track, idx) => ({ ...track, __sourceIndex: idx }));
 
+    // Le tracce senza note (es. conductor/tempo track tipica del MIDI Format 1) NON
+    // devono consumare slot di canale durante l'assignment: le filtriamo qui dopo il
+    // tagging cosi' __sourceIndex resta coerente con l'indice originale per la UI.
+    const nonEmpty = tagged.filter((track) => Array.isArray(track.notes) && track.notes.length > 0);
+
     // Reduce in tick domain (preserva la precisione delle sovrapposizioni reali).
-    const reduced = tagged.map((track) => reduceTrack(track, voiceStrategy));
+    const reduced = nonEmpty.map((track) => reduceTrack(track, voiceStrategy));
 
     // Quantize con la stepsPerBeat scelta dal timing adjustment (default 4 = 16th).
     const quantized = reduced.map((track) => quantizeTrack(track, parsedSong.ppq, timing.stepsPerBeat));
@@ -2629,7 +2634,10 @@
   }
 
   function buildChannelDropdown(trackIdx, currentValue) {
-    const channelMap = appState.activeChip === "NES" ? NES_CHANNEL_LABELS : TIA_CHANNEL_LABELS;
+    let channelMap;
+    if (appState.activeChip === "NES") channelMap = NES_CHANNEL_LABELS;
+    else if (appState.activeChip === "TIA") channelMap = TIA_CHANNEL_LABELS;
+    else channelMap = POKEY_CHANNEL_LABELS;
     const ids = Object.keys(channelMap);
     return buildLabeledSelect("Channel", ids, currentValue, (value) => {
       const existing = importSession.overrides.get(trackIdx) || {};
@@ -2858,11 +2866,13 @@
       return { warnings, notesWritten };
     }
 
-    // TIA AUDC e' per-pattern: va settato su OGNI pattern in cui l'assignment viene
-    // scritto, altrimenti i pattern successivi suonano col timbro default. POKEY non
-    // viene toccato qui (default $A0 dal pattern create), parita' col comportamento single-pattern.
+    // TIA/POKEY audc e' per-pattern: va settato su OGNI pattern in cui l'assignment viene
+    // scritto, altrimenti i pattern successivi suonano col timbro default. La personality
+    // dell'assignment (Sharp square / Smooth bass / Noise / ecc.) mappa su un audc concreto.
     if (appState.activeChip === "TIA") {
       data.audc = personalityToAudc(personality);
+    } else if (appState.activeChip === "POKEY") {
+      data.audc = personalityToPokeyAudc(personality);
     }
 
     const channelDef = getCurrentChannels().find((c) => c.id === channelId);
@@ -3009,6 +3019,23 @@
       case "Smooth bass":
       default:
         return 12;
+    }
+  }
+
+  function personalityToPokeyAudc(personality) {
+    // POKEY timbre options: $A0 Pure tone, $E0 Buzz, $80 Noise. Mappiamo coerentemente
+    // con buildPokeyConfig in gmMapping: Sharp -> Buzz, Noise/Percussion -> Noise,
+    // tutto il resto -> Pure tone (incluso Smooth bass, che su POKEY suona "clean low").
+    switch (personality) {
+      case "Sharp square":
+        return 0xE0;
+      case "Noise/Percussion":
+        return 0x80;
+      case "Soft square":
+      case "Standard square":
+      case "Smooth bass":
+      default:
+        return 0xA0;
     }
   }
 
