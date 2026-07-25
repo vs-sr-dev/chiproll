@@ -2098,6 +2098,25 @@
     return null;
   }
 
+  // True quando lo step continua la nota dello step precedente senza riattacco
+  // (drag-fill, MIDI sustain, run importato). E' la stessa regola usata dalla
+  // griglia per disegnare la pill unita: una continuazione "orfana" (niente
+  // nota prima, o pitch diverso) vale come attacco, non come legatura.
+  function isTiedToPrevious(channelId, step, patternId = appState.currentPatternId) {
+    if (step <= 0) {
+      return false;
+    }
+
+    const entry = getEntryForStep(channelId, step, patternId);
+
+    if (!entry || entry.isContinuation !== true) {
+      return false;
+    }
+
+    const previous = getEntryForStep(channelId, step - 1, patternId);
+    return !!previous && previous.rowId === entry.rowId;
+  }
+
   function clearChannelStep(channelId, step, patternId = appState.currentPatternId) {
     const data = channelData(channelId, patternId);
 
@@ -3987,11 +4006,23 @@
     render();
   }
 
+  // Formato text di FamiTracker 0.4.2: le celle sono 4 token separati da spazio
+  // (note 3ch, instrument 2ch, volume 1ch, un effect da 3ch per COLUMNS=1).
+  // Riga vuota = sustain di quello che sta suonando, `---` = note off.
+  const FT_EMPTY_CELL = "... .. . ...";
+  const FT_NOTE_OFF_CELL = "--- .. . ...";
+  const FT_INSTRUMENT = "00";
+  const FT_VOLUME = "F";
+  // Il 2A03 espone 5 canali: ChipRoll ne usa 4, il DPCM resta vuoto ma la colonna
+  // deve esserci comunque o l'import fallisce sul separatore.
+  const FT_DPCM_CELL = "... .. . ...";
+  const FT_MAX_FRAMES = 128;
+
   function buildFamiTrackerText() {
     const channels = NES_CHANNEL_DEFS;
     const orderedPatternIds = appState.patternOrder.slice();
     if (orderedPatternIds.length === 0) {
-      return "; No patterns to export";
+      return "# No patterns to export";
     }
 
     // FamiTracker text impone una pattern_length globale per il track. ChipRoll
@@ -4000,58 +4031,170 @@
     const stepCounts = orderedPatternIds.map((pid) => appState.patterns[pid].stepCount);
     const maxStep = Math.max(...stepCounts);
     const hasMixedStepCounts = stepCounts.some((s) => s !== maxStep);
-
-    const lines = [];
-    if (hasMixedStepCounts) {
-      lines.push(
-        `# NOTE: patterns have mixed step counts (${stepCounts.join(", ")}); shorter patterns are padded to ${maxStep} rows with empty cells.`,
-      );
-    }
-    lines.push(`# TRACK ${maxStep} ${appState.bpm} 6 "Exported from ChipRoll"`);
-    lines.push("# COLUMNS : 1 1 1 1");
+    const tempo = resolveFamiTrackerTempo(appState.bpm);
 
     const orderSource = appState.song.length === 0 ? orderedPatternIds : appState.song;
-    const orderIndices = orderSource
+    let frames = orderSource
       .map((pid) => orderedPatternIds.indexOf(pid))
-      .filter((i) => i >= 0);
-    const orderHex = orderIndices.map((i) => toUpperHex(i, 2)).join(" ");
-    lines.push(`# ORDER 0 : ${orderHex}`);
+      .filter((index) => index >= 0);
+    if (frames.length === 0) {
+      frames = [0];
+    }
+    const droppedFrames = Math.max(0, frames.length - FT_MAX_FRAMES);
+    frames = frames.slice(0, FT_MAX_FRAMES);
+
+    const usedChannels = new Set(
+      channels
+        .map((channel) => channel.id)
+        .filter((id) =>
+          orderedPatternIds.some((pid) => (channelData(id, pid)?.notes.size ?? 0) > 0),
+        ),
+    );
+
+    const lines = ["# FamiTracker text export 0.4.2", ""];
+
+    lines.push(
+      "# Exported from ChipRoll.",
+      "# A row with a note is an attack, a blank row sustains the note above it and",
+      "# `---` is a note off, so a note held across N cells in ChipRoll becomes one",
+      "# attack followed by N-1 blank rows.",
+      "# ChipRoll treats a pattern boundary as a note off while a tracker sustains",
+      "# across the order, so each pattern cuts on its first silent row per channel.",
+    );
+    if (hasMixedStepCounts) {
+      lines.push(
+        `# Patterns have mixed step counts (${stepCounts.join(", ")}); shorter patterns are`,
+        `# padded to ${maxStep} rows with empty cells.`,
+      );
+    }
+    if (tempo.bpm !== appState.bpm) {
+      lines.push(
+        `# ChipRoll BPM ${appState.bpm} is outside the tracker tempo range; exported as`,
+        `# speed ${tempo.speed} / tempo ${tempo.tempo} (~${tempo.bpm} BPM at 4 rows per beat).`,
+      );
+    }
+    if (droppedFrames > 0) {
+      lines.push(`# Song truncated to ${FT_MAX_FRAMES} frames (${droppedFrames} dropped).`);
+    }
+    lines.push("");
+
+    lines.push(
+      "# Song information",
+      'TITLE           "ChipRoll session"',
+      'AUTHOR          ""',
+      'COPYRIGHT       ""',
+      "",
+      "# Song comment",
+      'COMMENT         "Exported from ChipRoll"',
+      "",
+      "# Global settings",
+      "MACHINE         0",
+      "FRAMERATE       0",
+      "EXPANSION       0",
+      "VIBRATO         1",
+      "SPLIT           32",
+      "",
+      "# Instruments",
+      // Nessuna sequence (-1 x5): la nota suona col volume della colonna, che e'
+      // quello che ChipRoll intende (niente envelope, niente arpeggio).
+      'INST2A03   0  -1  -1  -1  -1  -1 "ChipRoll"',
+      "",
+      "# Tracks",
+      "",
+    );
+
+    lines.push(`TRACK ${maxStep} ${tempo.speed} ${tempo.tempo} "ChipRoll"`);
+    lines.push("COLUMNS : 1 1 1 1 1");
+    lines.push("");
+
+    frames.forEach((patternIdx, frame) => {
+      // Un pattern ChipRoll copre tutti i canali: lo stesso indice va su tutte
+      // e 5 le colonne del frame.
+      const row = Array.from({ length: 5 }, () => toUpperHex(patternIdx, 2)).join(" ");
+      lines.push(`ORDER ${toUpperHex(frame, 2)} : ${row}`);
+    });
+    lines.push("");
 
     orderedPatternIds.forEach((pid, patternIdx) => {
       const pattern = appState.patterns[pid];
-      lines.push(`# PATTERN ${toUpperHex(patternIdx, 2)}${pattern.label ? ` ; ${pattern.label}` : ""}`);
+      if (pattern.label) {
+        lines.push(`# ${pattern.label}`);
+      }
+      lines.push(`PATTERN ${toUpperHex(patternIdx, 2)}`);
+
+      // Parto da "sounding" a inizio pattern cosi' la prima riga vuota emette un
+      // note off: in ChipRoll il bordo pattern e' un note-off implicito, mentre
+      // nel tracker il suono prosegue oltre il confine di order. I canali mai
+      // usati nella sessione partono muti, cosi' restano puliti nel tracker.
+      const sounding = new Map(channels.map((channel) => [channel.id, usedChannels.has(channel.id)]));
+
       for (let step = 0; step < maxStep; step += 1) {
-        const cells = step < pattern.stepCount
-          ? channels.map((channel) => formatFamiTrackerCell(channel.id, getEntryForStep(channel.id, step, pid)))
-          : channels.map(() => "... .. . ....");
+        const cells = channels.map((channel) => {
+          // Oltre pattern.stepCount siamo nel padding verso maxStep: silenzio.
+          const entry = step < pattern.stepCount ? getEntryForStep(channel.id, step, pid) : null;
+
+          if (!entry) {
+            if (sounding.get(channel.id)) {
+              sounding.set(channel.id, false);
+              return FT_NOTE_OFF_CELL;
+            }
+            return FT_EMPTY_CELL;
+          }
+
+          sounding.set(channel.id, true);
+          // Riga vuota = sustain: e' cosi' che il tracker scrive una nota tenuta.
+          if (isTiedToPrevious(channel.id, step, pid)) {
+            return FT_EMPTY_CELL;
+          }
+
+          return formatFamiTrackerCell(channel.id, entry);
+        });
+        cells.push(FT_DPCM_CELL);
         lines.push(`ROW ${toUpperHex(step, 2)} : ${cells.join(" : ")}`);
       }
       lines.push("");
     });
 
-    return lines.join("\n").trimEnd();
+    lines.push("# End of export", "END");
+
+    return lines.join("\n");
+  }
+
+  // FamiTracker deriva le righe al minuto da tempo*24/speed; ChipRoll ha 4 step
+  // per beat, quindi speed 6 / tempo = BPM combacia esatto. Il tempo pero' e'
+  // limitato a 32..255: sopra i 255 BPM dimezzo il tempo e lo speed.
+  function resolveFamiTrackerTempo(bpm) {
+    if (bpm <= 255) {
+      return { speed: 6, tempo: bpm, bpm };
+    }
+
+    const tempo = Math.min(255, Math.round(bpm / 2));
+    return { speed: 3, tempo, bpm: tempo * 2 };
   }
 
   function formatFamiTrackerCell(channelId, entry) {
     if (!entry) {
-      return "... .. . ....";
+      return FT_EMPTY_CELL;
     }
 
     const channel = NES_CHANNEL_DEFS.find((item) => item.id === channelId);
 
     if (!channel) {
-      return "... .. . ....";
+      return FT_EMPTY_CELL;
     }
 
-    if (channel.kind === "noise") {
-      const note = formatNoiseToken(entry.noteName);
-      const registro = toUpperHex(entry.registro ?? 0, 2);
-      return `${note} ${registro} . ....`;
+    // Il valore di registro non entra nel file: nel tracker l'altezza sta nella
+    // nota, e la colonna instrument accetta solo indici < 64. I registri grezzi
+    // restano negli export ca65 e JSON.
+    const note = channel.kind === "noise"
+      ? formatNoiseToken(entry)
+      : formatFamiTrackerNote(entry.noteName);
+
+    if (note === "...") {
+      return FT_EMPTY_CELL;
     }
 
-    const note = formatFamiTrackerNote(entry.noteName);
-    const registro = toUpperHex(entry.nearest?.valore_registro ?? 0, 3);
-    return `${note} ${registro} . ....`;
+    return `${note} ${FT_INSTRUMENT} ${FT_VOLUME} ...`;
   }
 
   function buildCa65Assembly() {
@@ -4355,6 +4498,13 @@
   function buildGenericSessionJson() {
     const channels = getCurrentChannels();
     const snapshot = {
+      // format/format_version dicono al lettore che il campo `tie` c'e' ed e'
+      // autorevole: senza di esso una nota tenuta su 16 celle e 16 note ribattute
+      // erano indistinguibili, e chi legge doveva indovinare le durate.
+      format: "chiproll.grid",
+      format_version: 2,
+      tie_semantics:
+        "tie=true means this step continues the previous step's note with no re-attack; tie=false is a new attack.",
       active_chip: appState.activeChip,
       bpm: appState.bpm,
       step_count: currentStepCount(),
@@ -4373,6 +4523,7 @@
             return {
               step,
               note: null,
+              tie: false,
               real_hz: null,
               register: null,
               cents_offset: null,
@@ -4382,6 +4533,7 @@
           return {
             step,
             note: entry.noteName,
+            tie: isTiedToPrevious(channel.id, step),
             real_hz: entry.hz ?? null,
             register: resolveEntryRegister(channel, entry),
             cents_offset: entry.nearest?.scarto_cents ?? null,
@@ -4405,13 +4557,21 @@
     }
 
     const [, pitch, sharp, octave] = match;
+    // Il token nota e' largo esattamente 3 caratteri: le ottave fuori da 0..7
+    // non sono rappresentabili (i range NES di ChipRoll stanno dentro).
+    if (Number(octave) < 0 || Number(octave) > 7) {
+      return "...";
+    }
+
     return `${pitch}${sharp ? "#" : "-"}${octave}`;
   }
 
-  function formatNoiseToken(noteName) {
-    const match = /(\d+)$/.exec(noteName);
-    const indexText = match ? match[1] : "0";
-    return `N-${indexText.slice(-1)}`;
+  // Nel canale noise FamiTracker scrive (nota ^ $0F) in $400E: invertendo qui,
+  // il valore che finisce nel registro e' lo stesso "Period N" scelto nella
+  // griglia, coerente con quello che emettono gli export ca65 e JSON.
+  function formatNoiseToken(entry) {
+    const index = Math.max(0, Math.min(15, Number(entry.registro) || 0));
+    return `${toUpperHex(15 - index, 1)}-#`;
   }
 
   function toAssemblySymbol(channelId, noteName) {
